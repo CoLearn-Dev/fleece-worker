@@ -1,0 +1,3 @@
+*.pyc
+/fleece_worker.egg-info/
+/.vscode/
