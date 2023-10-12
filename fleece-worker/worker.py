@@ -31,7 +31,7 @@ class Worker:
         model_name, layer_name = parse_layer_name(full_layer_name)
         return os.path.join(self.cache_dir, "llama-2-7b-chat-slice", f"{layer_name}.pt")
 
-    async def preload_laters(self, layer_names: List[str]):
+    async def preload_layers(self, layer_names: List[str]):
         for full_layer_name in layer_names:
             if full_layer_name in self.layers:
                 continue

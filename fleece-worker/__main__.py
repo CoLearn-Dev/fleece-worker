@@ -17,7 +17,7 @@ async def preload_layers(
     req: LayersRequest
 ):
     try:
-        await worker.preload_laters(req.layer_names)
+        await worker.preload_layers(req.layer_names)
         return None
     except Exception as e:
         print(e)
