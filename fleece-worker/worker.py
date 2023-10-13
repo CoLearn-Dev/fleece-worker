@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 import os
 import torch
 from torch import nn
@@ -30,7 +30,7 @@ class Worker:
         self.mirror_url = mirror_url
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
-        self.task_info = dict()
+        self.task_info: Dict[str, Tuple[int, Dict[str, Any]]] = dict()
 
     async def download_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
@@ -70,15 +70,21 @@ class Worker:
                       plan: List[Tuple[str, List[str]]],
                       payload: List
                       ):
+        if payload is None:
+            del self.task_info[task_id]
+            return
+        if is_new_task:
+            pass  # TODO
         indices = [index for index, (_url, _) in enumerate(plan) if _url == self.my_url]
         assert len(indices) == 1
         index = indices[0]
+        # first node
         if index == 0:
-            pass
+            pass  # TODO
         # forward
         h = torch.HalfTensor(payload, device="cuda")
         _bsz, seqlen = h.shape
-        start_pos = 0  # TODO and KV cache
+        start_pos, kv_cache_dict = self.task_info[task_id]
         freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
         mask = None
         if seqlen > 1:
@@ -93,15 +99,21 @@ class Worker:
             if layer_name == "tok_embeddings":
                 h = self.layers[full_layer_name](h)
             elif layer_name.startswith("layers."):
-                h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask)
+                h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache_dict[full_layer_name])
+                del kv_cache_dict[full_layer_name]
+                kv_cache_dict[full_layer_name] = kv_cache
             elif layer_name == "norm":
                 h = self.layers[full_layer_name](h)
             elif layer_name == "output":
                 h = self.layers[full_layer_name](h)
             else:
                 raise NotImplementedError("Unknown layers")
+        self.task_info[task_id] = (start_pos+1, kv_cache_dict)
+        # last node
         if index == len(plan):
-            pass
+            pass  # TODO
+        # update
+        pass  # TODO
 
     async def get_info(self, req):
         pass

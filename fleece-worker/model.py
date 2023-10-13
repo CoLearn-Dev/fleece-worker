@@ -220,8 +220,6 @@ class Attention(nn.Module):
                                            bias=False,
                                            )
 
-        self.cache_k = None
-        self.cache_v = None
         # self.cache_k = torch.zeros(
         #     (
         #         args.max_batch_size,
@@ -416,7 +414,6 @@ class TransformerBlock(nn.Module):
         )
         if kv_cache is not None:
             self.attention.cache_k[:, :start_pos, :, :], self.attention.cache_v[:, :start_pos, :, :] = kv_cache
-            del kv_cache
         h = x + self.attention.forward(
             self.attention_norm(x), start_pos, freqs_cis, mask
         )
