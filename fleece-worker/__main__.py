@@ -5,7 +5,7 @@ import uvicorn
 from .worker import Worker
 
 app = FastAPI()
-worker = Worker(cache_dir="/home/ubuntu/llama")  # TODO
+worker = Worker("https://127.0.0.1:8080", cache_dir="/home/ubuntu/llama")  # TODO
 
 
 class LayersRequest(BaseModel):
@@ -39,8 +39,8 @@ async def unload_layers(
 class ForwardRequest(BaseModel):
     task_id: str
     is_new_task: bool
-    plan: List[Tuple[str, str]]
-    payload: List[float]
+    plan: List[Tuple[str, List[str]]]
+    payload: List
 
 
 @app.post("/forward")
