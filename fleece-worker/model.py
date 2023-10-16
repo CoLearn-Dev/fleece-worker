@@ -394,8 +394,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        bsz, seqlen, _ = x.shape  # TODO double check
-        print(x.shape)
+        bsz, seqlen, _ = x.shape
         self.attention.cache_k = torch.zeros(
             (
                 bsz,

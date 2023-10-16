@@ -3,6 +3,7 @@ import os
 import torch
 from torch import nn
 from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
+import requests
 
 torch.set_default_device('cpu')
 torch.set_default_dtype(torch.float16)
@@ -32,15 +33,15 @@ class Worker:
         self.layers = dict()
         self.task_info: Dict[str, Tuple[int, Dict[str, Any]]] = dict()
 
-    async def download_layer(self, full_layer_name):
+    def download_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
         return os.path.join(self.cache_dir, "llama-2-7b-chat-slice", f"{layer_name}.pt")
 
-    async def preload_layers(self, layer_names: List[str]):
+    def preload_layers(self, layer_names: List[str]):
         for full_layer_name in layer_names:
             if full_layer_name in self.layers:
                 continue
-            path = await self.download_layer(full_layer_name)
+            path = self.download_layer(full_layer_name)
             model_name, layer_name = parse_layer_name(full_layer_name)
             model_args = ModelArgs(**llama_2_7b_args)  # TODO
             if layer_name == "tok_embeddings":
@@ -57,14 +58,14 @@ class Worker:
             l.to("cuda")
             self.layers[full_layer_name] = l
 
-    async def unload_layers(self, layer_names: List[str]):
+    def unload_layers(self, layer_names: List[str]):
         for full_layer_name in layer_names:
             if full_layer_name not in self.layers:
                 continue  # TODO continue or warning?
             del self.layers[full_layer_name]
             torch.cuda.empty_cache()
 
-    async def forward(self,
+    def forward(self,
                       task_id: str,
                       is_new_task: bool,
                       plan: List[Tuple[str, List[str]]],
@@ -73,17 +74,23 @@ class Worker:
         if payload is None:
             del self.task_info[task_id]
             return
-        if is_new_task:
-            pass  # TODO
         indices = [index for index, (_url, _) in enumerate(plan) if _url == self.my_url]
         assert len(indices) == 1
         index = indices[0]
         # first node
         if index == 0:
-            pass  # TODO
+            # bsz=1
+            if is_new_task:
+                pass  # TODO batch
+            h = torch.tensor(payload, dtype=torch.int64, device="cuda")
+            _bsz, seqlen = h.shape
+        else:
+            h = torch.tensor(payload, dtype=torch.float16, device="cuda")
+            _bsz, seqlen, _ = h.shape
         # forward
-        h = torch.HalfTensor(payload, device="cuda")
-        _bsz, seqlen = h.shape
+        if is_new_task:
+            self.task_info[task_id] = (0, dict())
+
         start_pos, kv_cache_dict = self.task_info[task_id]
         freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
         mask = None
@@ -94,26 +101,51 @@ class Worker:
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
         # layer
         _, layer_names = plan[index]
-        for full_layer_name in layer_names:
-            model_name, layer_name = parse_layer_name(full_layer_name)
-            if layer_name == "tok_embeddings":
-                h = self.layers[full_layer_name](h)
-            elif layer_name.startswith("layers."):
-                h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache_dict[full_layer_name])
-                del kv_cache_dict[full_layer_name]
-                kv_cache_dict[full_layer_name] = kv_cache
-            elif layer_name == "norm":
-                h = self.layers[full_layer_name](h)
-            elif layer_name == "output":
-                h = self.layers[full_layer_name](h)
-            else:
-                raise NotImplementedError("Unknown layers")
-        self.task_info[task_id] = (start_pos+1, kv_cache_dict)
+        with torch.inference_mode():
+            for full_layer_name in layer_names:
+                model_name, layer_name = parse_layer_name(full_layer_name)
+                if layer_name == "tok_embeddings":
+                    h = self.layers[full_layer_name](h)
+                elif layer_name.startswith("layers."):
+                    if is_new_task:
+                        h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, None)
+                    else:
+                        h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache_dict[full_layer_name])
+                        del kv_cache_dict[full_layer_name]
+                    kv_cache_dict[full_layer_name] = kv_cache
+                elif layer_name == "norm":
+                    h = self.layers[full_layer_name](h)
+                elif layer_name == "output":
+                    h = self.layers[full_layer_name](h)
+                else:
+                    raise NotImplementedError("Unknown layers")
+        self.task_info[task_id] = (start_pos+seqlen, kv_cache_dict)
         # last node
-        if index == len(plan):
+        if index == len(plan)-1:
+            # TODO temperature
+            next_token = torch.argmax(h[:, -1], dim=-1)
+            # print(next_token)
+            # eos_id
+            # next node
+            r = requests.post(f"{plan[0][0]}/forward",
+                              json={
+                                  "task_id": task_id,
+                                  "is_new_task": False,
+                                  "plan": plan,
+                                  "payload": [next_token.tolist()],
+                              })
+            # update
+        else:
+            # next node
+            r = requests.post(f"{plan[index+1][0]}/forward",
+                              json={
+                                  "task_id": task_id,
+                                  "is_new_task": is_new_task,
+                                  "plan": plan,
+                                  "payload": h.tolist(),
+                              })
+            # update
             pass  # TODO
-        # update
-        pass  # TODO
 
-    async def get_info(self, req):
+    def get_info(self, req):
         pass

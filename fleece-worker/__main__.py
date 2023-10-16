@@ -1,11 +1,12 @@
 from typing import List, Tuple
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
 from .worker import Worker
+import asyncio
 
 app = FastAPI()
-worker = Worker("https://127.0.0.1:8080", cache_dir="/home/ubuntu/llama")  # TODO
+worker = Worker("http://127.0.0.1:8080", cache_dir="/home/ubuntu/llama")  # TODO
 
 
 class LayersRequest(BaseModel):
@@ -13,11 +14,11 @@ class LayersRequest(BaseModel):
 
 
 @app.post("/preload_layers")
-async def preload_layers(
+def preload_layers(
     req: LayersRequest
 ):
     try:
-        await worker.preload_layers(req.layer_names)
+        worker.preload_layers(req.layer_names)
         return None
     except Exception as e:
         print(e)
@@ -25,11 +26,11 @@ async def preload_layers(
 
 
 @app.post("/unload_layers")
-async def unload_layers(
+def unload_layers(
     req: LayersRequest
 ):
     try:
-        await worker.unload_layers(req.layer_names)
+        worker.unload_layers(req.layer_names)
         return None
     except Exception as e:
         print(e)
@@ -44,11 +45,12 @@ class ForwardRequest(BaseModel):
 
 
 @app.post("/forward")
-async def forward(
-    req: ForwardRequest
+def forward(
+    req: ForwardRequest,
+    background_tasks: BackgroundTasks
 ):
     try:
-        await worker.forward(req)
+        background_tasks.add_task(worker.forward, req.task_id, req.is_new_task, req.plan, req.payload)
         return None
     except Exception as e:
         print(e)
@@ -61,15 +63,16 @@ class GetInfoRequest(BaseModel):
 
 
 @app.post("/get_info")
-async def get_info(
+def get_info(
     req: GetInfoRequest
 ):
     try:
-        await worker.get_info(req)
+        worker.get_info(req)
         return None
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=8080)
