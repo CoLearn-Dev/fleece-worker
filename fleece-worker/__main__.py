@@ -3,7 +3,6 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
 from .worker import Worker
-import asyncio
 
 app = FastAPI()
 worker = Worker("http://127.0.0.1:8080", cache_dir="/home/ubuntu/llama")  # TODO

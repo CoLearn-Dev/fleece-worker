@@ -66,11 +66,11 @@ class Worker:
             torch.cuda.empty_cache()
 
     def forward(self,
-                      task_id: str,
-                      is_new_task: bool,
-                      plan: List[Tuple[str, List[str]]],
-                      payload: List
-                      ):
+                task_id: str,
+                is_new_task: bool,
+                plan: List[Tuple[str, List[str]]],
+                payload: List
+                ):
         if payload is None:
             del self.task_info[task_id]
             return
