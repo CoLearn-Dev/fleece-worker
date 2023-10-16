@@ -2,6 +2,7 @@ from typing import List, Tuple
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
+import sys
 from .worker import Worker
 
 app = FastAPI()
@@ -74,4 +75,13 @@ def get_info(
 
 
 if __name__ == '__main__':
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    if len(sys.argv) >= 2:
+        worker.my_url = sys.argv[1]
+        parsed = worker.my_url.split(':')
+        if len(parsed) >= 3:
+            port = int(parsed[2])
+        else:
+            port = 8080
+        uvicorn.run(app, host="0.0.0.0", port=port)
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=8080)

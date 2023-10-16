@@ -124,7 +124,7 @@ class Worker:
         if index == len(plan)-1:
             # TODO temperature
             next_token = torch.argmax(h[:, -1], dim=-1)
-            # print(next_token)
+            print(next_token)
             # eos_id
             # next node
             r = requests.post(f"{plan[0][0]}/forward",
