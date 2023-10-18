@@ -3,6 +3,7 @@ import os
 import torch
 from torch import nn
 from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
+# from .tokenizer import Tokenizer
 import requests
 
 torch.set_default_device('cpu')
@@ -13,11 +14,22 @@ llama_2_13b_args = {"dim": 5120, "multiple_of": 256, "n_heads": 40, "n_layers": 
 llama_2_70b_args = {"dim": 8192, "multiple_of": 4096, "ffn_dim_multiplier": 1.3, "n_heads": 64, "n_kv_heads": 8, "n_layers": 80, "norm_eps": 1e-05, "vocab_size": 32000}
 
 global_freqs_cis = precompute_freqs_cis(128, 4096).to("cuda")
+# tokenizer = Tokenizer(model_path="/home/ubuntu/llama/tokenizer.model")
+# print(tokenizer.bos_id) 1
+# print(tokenizer.eos_id) 2
+# print(tokenizer.pad_id) -1
+# print(tokenizer.n_words) 32000
 
 
 def parse_layer_name(layer_name: str):
     s = layer_name.split('/')
     return s[0], s[1]
+
+
+def del_tensor(t):
+    t.detach()
+    t.grad = None
+    t.untyped_storage().resize_(0)
 
 
 class Worker:
@@ -71,12 +83,26 @@ class Worker:
                 plan: List[Tuple[str, List[str]]],
                 payload: List
                 ):
-        if payload is None:
-            del self.task_info[task_id]
-            return
         indices = [index for index, (_url, _) in enumerate(plan) if _url == self.my_url]
         assert len(indices) == 1
         index = indices[0]
+        if payload is None:
+            _, kv_cache_dict = self.task_info[task_id]
+            for _, kv_cache in kv_cache_dict.items():
+                k_cache, v_cache = kv_cache
+                del_tensor(k_cache)
+                del_tensor(v_cache)
+            del self.task_info[task_id]
+            torch.cuda.empty_cache()
+            if index < len(plan)-1:
+                # next node
+                r = requests.post(f"{plan[index+1][0]}/forward",
+                                  json={
+                                      "task_id": task_id,
+                                      "is_new_task": is_new_task,
+                                      "plan": plan,
+                                  })
+            return
         # first node
         if index == 0:
             # bsz=1
@@ -111,6 +137,9 @@ class Worker:
                         h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, None)
                     else:
                         h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache_dict[full_layer_name])
+                        k_cache, v_cache = kv_cache_dict[full_layer_name]
+                        del_tensor(k_cache)
+                        del_tensor(v_cache)
                         del kv_cache_dict[full_layer_name]
                     kv_cache_dict[full_layer_name] = kv_cache
                 elif layer_name == "norm":
@@ -126,14 +155,22 @@ class Worker:
             next_token = torch.argmax(h[:, -1], dim=-1)
             print(next_token)
             # eos_id
-            # next node
-            r = requests.post(f"{plan[0][0]}/forward",
-                              json={
-                                  "task_id": task_id,
-                                  "is_new_task": False,
-                                  "plan": plan,
-                                  "payload": [next_token.tolist()],
-                              })
+            if next_token[0] != 2:
+                # next node
+                r = requests.post(f"{plan[0][0]}/forward",
+                                  json={
+                                      "task_id": task_id,
+                                      "is_new_task": False,
+                                      "plan": plan,
+                                      "payload": [next_token.tolist()],
+                                  })
+            else:
+                r = requests.post(f"{plan[0][0]}/forward",
+                                  json={
+                                      "task_id": task_id,
+                                      "is_new_task": False,
+                                      "plan": plan,
+                                  })
             # update
         else:
             # next node

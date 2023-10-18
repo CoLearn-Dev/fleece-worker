@@ -41,7 +41,7 @@ class ForwardRequest(BaseModel):
     task_id: str
     is_new_task: bool
     plan: List[Tuple[str, List[str]]]
-    payload: List
+    payload: List = None
 
 
 @app.post("/forward")
