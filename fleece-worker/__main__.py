@@ -4,6 +4,9 @@ from pydantic import BaseModel
 import uvicorn
 import sys
 from .worker import Worker
+import argparse
+import requests
+import json
 
 app = FastAPI()
 worker = Worker("http://127.0.0.1:8080", cache_dir="/home/ubuntu/llama")  # TODO
@@ -75,13 +78,27 @@ def get_info(
 
 
 if __name__ == '__main__':
-    if len(sys.argv) >= 2:
-        worker.my_url = sys.argv[1]
-        parsed = worker.my_url.split(':')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--controller-url")
+    parser.add_argument("-w", "--worker-url")
+    args = parser.parse_args()
+    if args.worker_url is not None:
+        worker.worker_url = sys.argv[1]
+        parsed = worker.worker_url.split(':')
         if len(parsed) >= 3:
             port = int(parsed[2])
         else:
             port = 8080
-        uvicorn.run(app, host="0.0.0.0", port=port)
     else:
-        uvicorn.run(app, host="0.0.0.0", port=8080)
+        port = 8080
+    if args.controller_url is not None:
+        worker.controller_url = args.controller_url
+        r = requests.post(f"{args.controller_url}/register_worker",
+                          json={
+                              "worker_url": worker.worker_url,
+                          })
+        worker.worker_token = json.loads(r.content)["access_token"]
+    uvicorn.run(app, host="0.0.0.0", port=port)
+    if args.controller_url is not None:
+        r = requests.post(f"{args.controller_url}/deregister_worker",
+                          headers={"worker-token": worker.worker_token})

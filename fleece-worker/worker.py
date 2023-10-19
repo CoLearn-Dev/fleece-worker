@@ -35,12 +35,14 @@ def del_tensor(t):
 class Worker:
     def __init__(
             self,
-            my_url: str,
+            worker_url: str,
             mirror_url: str = "TODO",
             cache_dir: str = "~/.cache/fleece-worker/data",
     ):
-        self.my_url = my_url
+        self.worker_url = worker_url
         self.mirror_url = mirror_url
+        self.controller_url = None
+        self.worker_token = None
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[str, Tuple[int, Dict[str, Any]]] = dict()
@@ -83,7 +85,7 @@ class Worker:
                 plan: List[Tuple[str, List[str]]],
                 payload: List
                 ):
-        indices = [index for index, (_url, _) in enumerate(plan) if _url == self.my_url]
+        indices = [index for index, (_url, _) in enumerate(plan) if _url == self.worker_url]
         assert len(indices) == 1
         index = indices[0]
         if payload is None:
@@ -172,6 +174,14 @@ class Worker:
                                       "plan": plan,
                                   })
             # update
+            if self.controller_url is not None:
+                r = requests.post(f"{self.controller_url}/update_task",
+                                  headers={"worker-token": self.worker_token},
+                                  json={
+                                      "t_id": task_id,
+                                      "status": "ok",
+                                      "output_token": next_token
+                                  })
         else:
             # next node
             r = requests.post(f"{plan[index+1][0]}/forward",
@@ -182,7 +192,13 @@ class Worker:
                                   "payload": h.tolist(),
                               })
             # update
-            pass  # TODO
+            if self.controller_url is not None:
+                r = requests.post(f"{self.controller_url}/update_task",
+                                  headers={"worker-token": self.worker_token},
+                                  json={
+                                      "t_id": task_id,
+                                      "status": "ok",
+                                  })
 
     def get_info(self, req):
         pass
