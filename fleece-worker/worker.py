@@ -181,7 +181,7 @@ class Worker:
                                   json={
                                       "t_id": task_id,
                                       "status": "ok",
-                                      "output_token": next_token
+                                      "output_token": next_token.tolist()
                                   })
         else:
             # next node
