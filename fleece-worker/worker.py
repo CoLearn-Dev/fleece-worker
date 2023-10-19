@@ -129,6 +129,7 @@ class Worker:
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
         # layer
         _, layer_names = plan[index]
+        self.preload_layers(layer_names)  # preload
         with torch.inference_mode():
             for full_layer_name in layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
