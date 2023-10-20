@@ -50,7 +50,7 @@ class Worker:
     def fetch_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
         path = os.path.join(self.cache_dir, model_name, f"{layer_name}.pt")
-        if not os.path.exists(path):
+        if not os.path.exists(path):  # TODO lock
             os.makedirs(os.path.join(self.cache_dir, model_name), exist_ok=True)
             with requests.get(f"https://huggingface.co/colearn/{model_name}/resolve/main/{layer_name}.pt", stream=True) as r:
                 r.raise_for_status()
