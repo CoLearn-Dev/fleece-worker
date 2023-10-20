@@ -37,7 +37,7 @@ class Worker:
             self,
             worker_url: str,
             mirror_url: str = "TODO",
-            cache_dir: str = "~/.cache/fleece-worker/data",
+            cache_dir: str = "~/.cache/fleece-worker/models",
     ):
         self.worker_url = worker_url
         self.mirror_url = mirror_url
@@ -47,15 +47,23 @@ class Worker:
         self.layers = dict()
         self.task_info: Dict[str, Tuple[int, Dict[str, Any]]] = dict()
 
-    def download_layer(self, full_layer_name):
+    def fetch_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
-        return os.path.join(self.cache_dir, "llama-2-7b-chat-slice", f"{layer_name}.pt")
+        path = os.path.join(self.cache_dir, model_name, f"{layer_name}.pt")
+        if not os.path.exists(path):
+            os.makedirs(os.path.join(self.cache_dir, model_name), exist_ok=True)
+            with requests.get(f"https://huggingface.co/colearn/{model_name}/resolve/main/{layer_name}.pt", stream=True) as r:
+                r.raise_for_status()
+                with open(path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+        return path
 
     def preload_layers(self, layer_names: List[str]):
         for full_layer_name in layer_names:
             if full_layer_name in self.layers:
                 continue
-            path = self.download_layer(full_layer_name)
+            path = self.fetch_layer(full_layer_name)
             model_name, layer_name = parse_layer_name(full_layer_name)
             model_args = ModelArgs(**llama_2_7b_args)  # TODO
             if layer_name == "tok_embeddings":

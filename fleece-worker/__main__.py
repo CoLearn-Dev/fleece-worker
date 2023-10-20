@@ -9,7 +9,7 @@ import requests
 import json
 
 app = FastAPI()
-worker = Worker("http://127.0.0.1:8080", cache_dir="/home/ubuntu/llama")  # TODO
+worker = Worker("http://127.0.0.1:8080")
 
 
 class LayersRequest(BaseModel):
