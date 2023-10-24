@@ -111,6 +111,7 @@ class Worker:
                                       "task_id": task_id,
                                       "is_new_task": is_new_task,
                                       "plan": plan,
+                                      "step": step+1,
                                   })
             return
         # first node
@@ -183,6 +184,7 @@ class Worker:
                                       "task_id": task_id,
                                       "is_new_task": False,
                                       "plan": plan,
+                                      "step": 0,
                                   })
             # update
             if self.controller_url is not None:

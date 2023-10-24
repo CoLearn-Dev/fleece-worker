@@ -44,7 +44,7 @@ class ForwardRequest(BaseModel):
     task_id: str
     is_new_task: bool
     plan: List[Tuple[str, List[str]]]
-    step: int = -1
+    step: int
     round: int = -1
     payload: List = None
 
