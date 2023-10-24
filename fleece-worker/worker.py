@@ -45,7 +45,7 @@ class Worker:
         self.worker_token = None
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
-        self.task_info: Dict[str, Tuple[int, Dict[str, Any]]] = dict()
+        self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
 
     def fetch_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
@@ -97,12 +97,12 @@ class Worker:
                 ):
         index = step
         if payload is None:
-            _, kv_cache_dict = self.task_info[task_id]
+            _, kv_cache_dict = self.task_info[(task_id, step)]
             for _, kv_cache in kv_cache_dict.items():
                 k_cache, v_cache = kv_cache
                 del_tensor(k_cache)
                 del_tensor(v_cache)
-            del self.task_info[task_id]
+            del self.task_info[(task_id, step)]
             torch.cuda.empty_cache()
             if index < len(plan)-1:
                 # next node
@@ -126,9 +126,9 @@ class Worker:
             _bsz, seqlen, _ = h.shape
         # forward
         if is_new_task:
-            self.task_info[task_id] = (0, dict())
+            self.task_info[(task_id, step)] = (0, dict())
 
-        start_pos, kv_cache_dict = self.task_info[task_id]
+        start_pos, kv_cache_dict = self.task_info[(task_id, step)]
         freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
         mask = None
         if seqlen > 1:
@@ -160,7 +160,7 @@ class Worker:
                     h = self.layers[full_layer_name](h)
                 else:
                     raise NotImplementedError("Unknown layers")
-        self.task_info[task_id] = (start_pos+seqlen, kv_cache_dict)
+        self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
         # last node
         if index == len(plan)-1:
             # TODO temperature
