@@ -44,6 +44,8 @@ class ForwardRequest(BaseModel):
     task_id: str
     is_new_task: bool
     plan: List[Tuple[str, List[str]]]
+    step: int = -1
+    round: int = -1
     payload: List = None
 
 
@@ -53,7 +55,7 @@ def forward(
     background_tasks: BackgroundTasks
 ):
     try:
-        background_tasks.add_task(worker.forward, req.task_id, req.is_new_task, req.plan, req.payload)
+        background_tasks.add_task(worker.forward, req.task_id, req.is_new_task, req.plan, req.step, req.round, req.payload)
         return None
     except Exception as e:
         print(e)

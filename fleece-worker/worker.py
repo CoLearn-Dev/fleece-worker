@@ -91,11 +91,11 @@ class Worker:
                 task_id: str,
                 is_new_task: bool,
                 plan: List[Tuple[str, List[str]]],
+                step: int,
+                round: int,
                 payload: List
                 ):
-        indices = [index for index, (_url, _) in enumerate(plan) if _url == self.worker_url]
-        assert len(indices) == 1
-        index = indices[0]
+        index = step
         if payload is None:
             _, kv_cache_dict = self.task_info[task_id]
             for _, kv_cache in kv_cache_dict.items():
@@ -173,6 +173,8 @@ class Worker:
                                       "task_id": task_id,
                                       "is_new_task": False,
                                       "plan": plan,
+                                      "step": 0,
+                                      "round": round+1,
                                       "payload": [next_token.tolist()],
                                   })
             else:
@@ -188,8 +190,9 @@ class Worker:
                                   headers={"worker-token": self.worker_token},
                                   json={
                                       "t_id": task_id,
-                                      "status": "ok",
-                                      "output_token": next_token.tolist()
+                                      "plan_current_step": step,
+                                      "plan_current_round": round,
+                                      "output_tokens": next_token.tolist(),
                                   })
         else:
             # next node
@@ -198,6 +201,8 @@ class Worker:
                                   "task_id": task_id,
                                   "is_new_task": is_new_task,
                                   "plan": plan,
+                                  "step": step+1,
+                                  "round": round,
                                   "payload": h.tolist(),
                               })
             # update
@@ -206,7 +211,8 @@ class Worker:
                                   headers={"worker-token": self.worker_token},
                                   json={
                                       "t_id": task_id,
-                                      "status": "ok",
+                                      "plan_current_step": step,
+                                      "plan_current_round": round,
                                   })
 
     def get_info(self, req):
