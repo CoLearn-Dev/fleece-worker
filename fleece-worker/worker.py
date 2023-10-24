@@ -6,6 +6,7 @@ from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
 # from .tokenizer import Tokenizer
 import requests
 import threading
+import concurrent.futures
 
 torch.set_default_device('cpu')
 torch.set_default_dtype(torch.float16)
@@ -31,6 +32,17 @@ def del_tensor(t):
     t.detach()
     t.grad = None
     t.untyped_storage().resize_(0)
+
+
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
+
+
+def requests_post(url, headers=None, json=None):
+    requests.post(url, headers=headers, json=json)
+
+
+def send_request(url, headers=None, json=None):
+    executor.submit(requests_post, url, headers, json)
 
 
 class Worker:
@@ -109,13 +121,14 @@ class Worker:
             torch.cuda.empty_cache()
             if index < len(plan)-1:
                 # next node
-                r = requests.post(f"{plan[index+1][0]}/forward",
-                                  json={
-                                      "task_id": task_id,
-                                      "is_new_task": is_new_task,
-                                      "plan": plan,
-                                      "step": step+1,
-                                  })
+                send_request(
+                    f"{plan[index+1][0]}/forward",
+                    json={
+                        "task_id": task_id,
+                        "is_new_task": is_new_task,
+                        "plan": plan,
+                        "step": step+1,
+                    })
             return
         # first node
         if index == 0:
@@ -177,53 +190,58 @@ class Worker:
             # eos_id
             if next_token[0] != 2:
                 # next node
-                r = requests.post(f"{plan[0][0]}/forward",
-                                  json={
-                                      "task_id": task_id,
-                                      "is_new_task": False,
-                                      "plan": plan,
-                                      "step": 0,
-                                      "round": round+1,
-                                      "payload": [next_token.tolist()],
-                                  })
+                send_request(
+                    f"{plan[0][0]}/forward",
+                    json={
+                        "task_id": task_id,
+                        "is_new_task": False,
+                        "plan": plan,
+                        "step": 0,
+                        "round": round+1,
+                        "payload": [next_token.tolist()],
+                    })
             else:
-                r = requests.post(f"{plan[0][0]}/forward",
-                                  json={
-                                      "task_id": task_id,
-                                      "is_new_task": False,
-                                      "plan": plan,
-                                      "step": 0,
-                                  })
+                send_request(
+                    f"{plan[0][0]}/forward",
+                    json={
+                        "task_id": task_id,
+                        "is_new_task": False,
+                        "plan": plan,
+                        "step": 0,
+                    })
             # update
             if self.controller_url is not None:
-                r = requests.post(f"{self.controller_url}/update_task",
-                                  headers={"worker-token": self.worker_token},
-                                  json={
-                                      "t_id": task_id,
-                                      "plan_current_step": step,
-                                      "plan_current_round": round,
-                                      "output_tokens": next_token.tolist(),
-                                  })
+                send_request(
+                    f"{self.controller_url}/update_task",
+                    headers={"worker-token": self.worker_token},
+                    json={
+                        "t_id": task_id,
+                        "plan_current_step": step,
+                        "plan_current_round": round,
+                        "output_tokens": next_token.tolist(),
+                    })
         else:
             # next node
-            r = requests.post(f"{plan[index+1][0]}/forward",
-                              json={
-                                  "task_id": task_id,
-                                  "is_new_task": is_new_task,
-                                  "plan": plan,
-                                  "step": step+1,
-                                  "round": round,
-                                  "payload": h.tolist(),
-                              })
+            send_request(
+                f"{plan[index+1][0]}/forward",
+                json={
+                    "task_id": task_id,
+                    "is_new_task": is_new_task,
+                    "plan": plan,
+                    "step": step+1,
+                    "round": round,
+                    "payload": h.tolist(),
+                })
             # update
             if self.controller_url is not None:
-                r = requests.post(f"{self.controller_url}/update_task",
-                                  headers={"worker-token": self.worker_token},
-                                  json={
-                                      "t_id": task_id,
-                                      "plan_current_step": step,
-                                      "plan_current_round": round,
-                                  })
+                send_request(
+                    f"{self.controller_url}/update_task",
+                    headers={"worker-token": self.worker_token},
+                    json={
+                        "t_id": task_id,
+                        "plan_current_step": step,
+                        "plan_current_round": round,
+                    })
 
     def get_info(self, req):
         pass
