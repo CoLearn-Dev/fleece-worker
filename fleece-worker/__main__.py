@@ -85,7 +85,7 @@ if __name__ == '__main__':
     parser.add_argument("-w", "--worker-url")
     args = parser.parse_args()
     if args.worker_url is not None:
-        worker.worker_url = sys.argv[1]
+        worker.worker_url = args.worker_url
         parsed = worker.worker_url.split(':')
         if len(parsed) >= 3:
             port = int(parsed[2])
