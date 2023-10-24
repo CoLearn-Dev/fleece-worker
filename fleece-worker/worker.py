@@ -5,6 +5,7 @@ from torch import nn
 from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
 # from .tokenizer import Tokenizer
 import requests
+import threading
 
 torch.set_default_device('cpu')
 torch.set_default_dtype(torch.float16)
@@ -46,6 +47,7 @@ class Worker:
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
+        self.mutex = threading.Lock()
 
     def fetch_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
@@ -60,25 +62,26 @@ class Worker:
         return path
 
     def preload_layers(self, layer_names: List[str]):
-        for full_layer_name in layer_names:
-            if full_layer_name in self.layers:
-                continue
-            path = self.fetch_layer(full_layer_name)
-            model_name, layer_name = parse_layer_name(full_layer_name)
-            model_args = ModelArgs(**llama_2_7b_args)  # TODO
-            if layer_name == "tok_embeddings":
-                l = torch.nn.utils.skip_init(nn.Embedding, model_args.vocab_size, model_args.dim)
-            elif layer_name.startswith("layer"):
-                l = TransformerBlock(model_args)
-            elif layer_name == "norm":
-                l = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-            elif layer_name == "output":
-                l = torch.nn.utils.skip_init(nn.Linear, model_args.dim, model_args.vocab_size, bias=False)
-            else:
-                raise NotImplementedError("Unknown layers")
-            l.load_state_dict(torch.load(path, map_location="cpu"))
-            l.to("cuda")
-            self.layers[full_layer_name] = l
+        with self.mutex:  # TODO
+            for full_layer_name in layer_names:
+                if full_layer_name in self.layers:
+                    continue
+                path = self.fetch_layer(full_layer_name)
+                model_name, layer_name = parse_layer_name(full_layer_name)
+                model_args = ModelArgs(**llama_2_7b_args)  # TODO
+                if layer_name == "tok_embeddings":
+                    l = torch.nn.utils.skip_init(nn.Embedding, model_args.vocab_size, model_args.dim)
+                elif layer_name.startswith("layer"):
+                    l = TransformerBlock(model_args)
+                elif layer_name == "norm":
+                    l = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+                elif layer_name == "output":
+                    l = torch.nn.utils.skip_init(nn.Linear, model_args.dim, model_args.vocab_size, bias=False)
+                else:
+                    raise NotImplementedError("Unknown layers")
+                l.load_state_dict(torch.load(path, map_location="cpu"))
+                l.to("cuda")
+                self.layers[full_layer_name] = l
 
     def unload_layers(self, layer_names: List[str]):
         for full_layer_name in layer_names:
@@ -143,21 +146,26 @@ class Worker:
             for full_layer_name in layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
                 if layer_name == "tok_embeddings":
-                    h = self.layers[full_layer_name](h)
+                    with self.mutex:
+                        h = self.layers[full_layer_name](h)
                 elif layer_name.startswith("layers."):
                     if is_new_task:
-                        h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, None)
+                        with self.mutex:
+                            h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, None)
                     else:
-                        h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache_dict[full_layer_name])
+                        with self.mutex:
+                            h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache_dict[full_layer_name])
                         k_cache, v_cache = kv_cache_dict[full_layer_name]
                         del_tensor(k_cache)
                         del_tensor(v_cache)
                         del kv_cache_dict[full_layer_name]
                     kv_cache_dict[full_layer_name] = kv_cache
                 elif layer_name == "norm":
-                    h = self.layers[full_layer_name](h)
+                    with self.mutex:
+                        h = self.layers[full_layer_name](h)
                 elif layer_name == "output":
-                    h = self.layers[full_layer_name](h)
+                    with self.mutex:
+                        h = self.layers[full_layer_name](h)
                 else:
                     raise NotImplementedError("Unknown layers")
         self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
