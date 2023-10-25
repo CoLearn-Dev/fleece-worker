@@ -28,6 +28,68 @@ def parse_layer_name(layer_name: str):
     return s[0], s[1]
 
 
+KV_CACHE_BLOCK = 512
+
+
+def get_kv_cache_length(cur, seqlen):
+    while cur < seqlen:
+        cur += KV_CACHE_BLOCK
+    return cur
+
+
+def get_kv_cache(x, start_pos, kv_cache, model):
+    bsz, seqlen, _ = x.shape
+    if kv_cache is None:
+        length = get_kv_cache_length(0, start_pos + seqlen)
+        cache_k = torch.zeros(
+            (
+                bsz,
+                length,
+                model.attention.n_local_kv_heads,
+                model.attention.head_dim,
+            ),
+            device="cuda"
+        )
+        cache_v = torch.zeros(
+            (
+                bsz,
+                length,
+                model.attention.n_local_kv_heads,
+                model.attention.head_dim,
+            ),
+            device="cuda"
+        )
+        return (cache_k, cache_v)
+    old_cache_k, old_cache_v = kv_cache
+    if start_pos + seqlen > old_cache_k.shape[1]:
+        length = get_kv_cache_length(old_cache_k.shape[1], start_pos + seqlen)
+        cache_k = torch.zeros(
+            (
+                bsz,
+                length,
+                model.attention.n_local_kv_heads,
+                model.attention.head_dim,
+            ),
+            device="cuda"
+        )
+        cache_v = torch.zeros(
+            (
+                bsz,
+                length,
+                model.attention.n_local_kv_heads,
+                model.attention.head_dim,
+            ),
+            device="cuda"
+        )
+        cache_k[:, :start_pos, :, :], cache_v[:, :start_pos, :, :] = old_cache_k[:, :start_pos, :, :], old_cache_v[:, :start_pos, :, :]
+        del_tensor(old_cache_k)
+        del_tensor(old_cache_v)
+        del kv_cache
+        return (cache_k, cache_v)
+    else:
+        return kv_cache
+
+
 def del_tensor(t):
     t.detach()
     t.grad = None
@@ -163,15 +225,11 @@ class Worker:
                         h = self.layers[full_layer_name](h)
                 elif layer_name.startswith("layers."):
                     if is_new_task:
-                        with self.mutex:
-                            h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, None)
+                        kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
                     else:
-                        with self.mutex:
-                            h, kv_cache = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache_dict[full_layer_name])
-                        k_cache, v_cache = kv_cache_dict[full_layer_name]
-                        del_tensor(k_cache)
-                        del_tensor(v_cache)
-                        del kv_cache_dict[full_layer_name]
+                        kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
+                    with self.mutex:
+                        h = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache)
                     kv_cache_dict[full_layer_name] = kv_cache
                 elif layer_name == "norm":
                     with self.mutex:

@@ -267,8 +267,8 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        # self.cache_k = self.cache_k.to(xq)
+        # self.cache_v = self.cache_v.to(xq)
 
         self.cache_k[:bsz, start_pos: start_pos + seqlen] = xk
         self.cache_v[:bsz, start_pos: start_pos + seqlen] = xv
@@ -394,30 +394,12 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        bsz, seqlen, _ = x.shape
-        self.attention.cache_k = torch.zeros(
-            (
-                bsz,
-                start_pos + seqlen,
-                self.attention.n_local_kv_heads,
-                self.attention.head_dim,
-            )
-        )
-        self.attention.cache_v = torch.zeros(
-            (
-                bsz,
-                start_pos + seqlen,
-                self.attention.n_local_kv_heads,
-                self.attention.head_dim,
-            )
-        )
-        if kv_cache is not None:
-            self.attention.cache_k[:, :start_pos, :, :], self.attention.cache_v[:, :start_pos, :, :] = kv_cache
+        self.attention.cache_k, self.attention.cache_v = kv_cache
         h = x + self.attention.forward(
             self.attention_norm(x), start_pos, freqs_cis, mask
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out, (self.attention.cache_k, self.attention.cache_v)
+        return out
 
 
 # class Transformer(nn.Module):
