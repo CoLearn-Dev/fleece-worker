@@ -244,6 +244,8 @@ class Worker:
         if index == len(plan)-1:
             # TODO temperature
             next_token = torch.argmax(h[:, -1], dim=-1)
+            if start_pos > 4000:
+                next_token = torch.tensor([2])  # FIXME fake max length limit
             print(next_token)
             # eos_id
             if next_token[0] != 2:
