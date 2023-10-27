@@ -218,27 +218,24 @@ class Worker:
         _, layer_names = plan[index]
         self.preload_layers(layer_names)  # preload
         with torch.inference_mode():
-            for full_layer_name in layer_names:
-                model_name, layer_name = parse_layer_name(full_layer_name)
-                if layer_name == "tok_embeddings":
-                    with self.mutex:
+            with self.mutex:
+                for full_layer_name in layer_names:
+                    model_name, layer_name = parse_layer_name(full_layer_name)
+                    if layer_name == "tok_embeddings":
                         h = self.layers[full_layer_name](h)
-                elif layer_name.startswith("layers."):
-                    if is_new_task:
-                        kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
-                    else:
-                        kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
-                    with self.mutex:
+                    elif layer_name.startswith("layers."):
+                        if is_new_task:
+                            kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
+                        else:
+                            kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
                         h = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache)
-                    kv_cache_dict[full_layer_name] = kv_cache
-                elif layer_name == "norm":
-                    with self.mutex:
+                        kv_cache_dict[full_layer_name] = kv_cache
+                    elif layer_name == "norm":
                         h = self.layers[full_layer_name](h)
-                elif layer_name == "output":
-                    with self.mutex:
+                    elif layer_name == "output":
                         h = self.layers[full_layer_name](h)
-                else:
-                    raise NotImplementedError("Unknown layers")
+                    else:
+                        raise NotImplementedError("Unknown layers")
         self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
         # last node
         if index == len(plan)-1:

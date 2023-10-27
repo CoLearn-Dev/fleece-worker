@@ -244,6 +244,7 @@ class Attention(nn.Module):
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
+        kv_cache: Tuple[torch.Tensor, torch.Tensor],
     ):
         """
         Forward pass of the attention module.
@@ -270,11 +271,12 @@ class Attention(nn.Module):
         # self.cache_k = self.cache_k.to(xq)
         # self.cache_v = self.cache_v.to(xq)
 
-        self.cache_k[:bsz, start_pos: start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos: start_pos + seqlen] = xv
+        cache_k, cache_v = kv_cache
+        cache_k[:bsz, start_pos: start_pos + seqlen] = xk
+        cache_v[:bsz, start_pos: start_pos + seqlen] = xv
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+        keys = cache_k[:bsz, : start_pos + seqlen]
+        values = cache_v[:bsz, : start_pos + seqlen]
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -394,9 +396,8 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        self.attention.cache_k, self.attention.cache_v = kv_cache
         h = x + self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_cis, mask
+            self.attention_norm(x), start_pos, freqs_cis, mask, kv_cache
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
