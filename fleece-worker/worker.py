@@ -137,10 +137,14 @@ class Worker:
 
     def preload_layers(self, layer_names: List[str]):
         with self.mutex:  # TODO
+            ths = []
             for full_layer_name in layer_names:
                 if full_layer_name in self.layers:
                     continue
-                path = self.fetch_layer(full_layer_name)
+                th = executor.submit(self.fetch_layer, full_layer_name)
+                ths.append((full_layer_name, th))
+            for full_layer_name, th in ths:
+                path = th.result()
                 model_name, layer_name = parse_layer_name(full_layer_name)
                 if model_name.startswith("llama-2-7b"):
                     model_args = ModelArgs(**llama_2_7b_args)
