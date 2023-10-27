@@ -142,7 +142,14 @@ class Worker:
                     continue
                 path = self.fetch_layer(full_layer_name)
                 model_name, layer_name = parse_layer_name(full_layer_name)
-                model_args = ModelArgs(**llama_2_7b_args)  # TODO
+                if model_name.startswith("llama-2-7b"):
+                    model_args = ModelArgs(**llama_2_7b_args)
+                elif model_name.startswith("llama-2-13b"):
+                    model_args = ModelArgs(**llama_2_13b_args)
+                elif model_name.startswith("llama-2-70b"):
+                    model_args = ModelArgs(**llama_2_70b_args)
+                else:
+                    raise NotImplementedError("Unknown model")
                 if layer_name == "tok_embeddings":
                     l = torch.nn.utils.skip_init(nn.Embedding, model_args.vocab_size, model_args.dim)
                 elif layer_name.startswith("layer"):
