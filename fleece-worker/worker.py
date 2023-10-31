@@ -97,14 +97,18 @@ def del_tensor(t):
 
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
+executor_forward = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 
 
 def requests_post(url, headers=None, json=None):
     requests.post(url, headers=headers, json=json)
 
 
-def send_request(url, headers=None, json=None):
-    executor.submit(requests_post, url, headers, json)
+def send_request(url, headers=None, json=None, exec=None):
+    if exec is None:
+        executor.submit(requests_post, url, headers, json)
+    else:
+        exec.submit(requests_post, url, headers, json)
 
 
 class Worker:
@@ -201,7 +205,8 @@ class Worker:
                         "is_new_task": is_new_task,
                         "plan": plan,
                         "step": step+1,
-                    })
+                    },
+                    exec=executor_forward)
             return
         # first node
         if index == 0:
@@ -267,7 +272,8 @@ class Worker:
                         "step": 0,
                         "round": round+1,
                         "payload": [next_token.tolist()],
-                    })
+                    },
+                    exec=executor_forward)
             else:
                 send_request(
                     f"{plan[0][0]}/forward",
@@ -276,7 +282,8 @@ class Worker:
                         "is_new_task": False,
                         "plan": plan,
                         "step": 0,
-                    })
+                    },
+                    exec=executor_forward)
             # update
             if self.controller_url is not None:
                 send_request(
@@ -299,7 +306,8 @@ class Worker:
                     "step": step+1,
                     "round": round,
                     "payload": h.tolist(),
-                })
+                },
+                exec=executor_forward)
             # update
             if self.controller_url is not None:
                 send_request(
