@@ -2,14 +2,13 @@ from typing import List, Tuple, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
-import sys
 from .worker import Worker
 import argparse
 import requests
 import json
 
 app = FastAPI()
-worker = Worker("http://127.0.0.1:8080")
+worker = Worker()
 
 
 class LayersRequest(BaseModel):
@@ -46,7 +45,7 @@ class ForwardRequest(BaseModel):
     plan: List[Tuple[str, List[str]]]
     step: int
     round: int = -1
-    payload: List = None
+    payload: Optional[List] = None
 
 
 @app.post("/forward")
@@ -98,6 +97,7 @@ if __name__ == '__main__':
         else:
             port = 8080
     else:
+        worker.worker_url = "http://127.0.0.1:8080"
         port = 8080
     if args.controller_url is not None:
         worker.controller_url = args.controller_url

@@ -155,12 +155,12 @@ def measure_latency(node_list: List[str], timeout):
 class Worker:
     def __init__(
             self,
-            worker_url: str,
-            mirror_url: str = "TODO",
+            worker_url: str = None,
+            # mirror_url: str = "TODO",
             cache_dir: str = "~/.cache/fleece-worker/models",
     ):
         self.worker_url = worker_url
-        self.mirror_url = mirror_url
+        # self.mirror_url = mirror_url
         self.controller_url = None
         self.worker_token = None
         self.cache_dir = os.path.expanduser(cache_dir)
