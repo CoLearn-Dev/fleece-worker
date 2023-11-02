@@ -7,6 +7,9 @@ from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
 import requests
 import threading
 import concurrent.futures
+import time
+import socket
+from urllib.parse import urlparse
 
 torch.set_default_device('cpu')
 torch.set_default_dtype(torch.float16)
@@ -109,6 +112,44 @@ def send_request(url, headers=None, json=None, exec=None):
         executor.submit(requests_post, url, headers, json)
     else:
         exec.submit(requests_post, url, headers, json)
+
+
+executor_latency_test = concurrent.futures.ThreadPoolExecutor(max_workers=40)
+
+
+def latency_test(host: str, port: int, timeout=60):
+    st = time.monotonic()
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.shutdown(socket.SHUT_RD)
+    except socket.timeout:
+        return None
+    except OSError:
+        return None
+    en = time.monotonic()
+    return (en-st)*1000
+
+
+def measure_latency(node_list: List[str], timeout):
+    # executor_latency_test
+    jobs = []
+    for node in node_list:
+        parsed_url = urlparse(node)
+        host = parsed_url.hostname
+        if parsed_url.port is not None:
+            port = parsed_url.port
+        elif parsed_url.scheme == "http":
+            port = 80
+        elif parsed_url.scheme == "https":
+            port = 443
+        else:
+            port = 22
+        jobs.append(executor_latency_test.submit(latency_test, host, port, timeout))
+    ans = []
+    for job in jobs:
+        ans.append(job.result())
+    print(ans)
+    return ans
 
 
 class Worker:
@@ -319,5 +360,7 @@ class Worker:
                         "plan_current_round": round,
                     })
 
-    def get_info(self, req):
-        pass
+    def get_info(self, node_list, timeout):
+        gpu_mem_info = torch.cuda.mem_get_info()
+        latency_list = measure_latency(node_list, timeout)
+        return gpu_mem_info, latency_list

@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import uvicorn
@@ -63,17 +63,23 @@ def forward(
 
 
 class GetInfoRequest(BaseModel):
-    node_list: List[str] = None
+    node_list: List[str] = []
     timeout: int = 30
+
+
+class GetInfoResponse(BaseModel):
+    gpu_mem_info: Tuple[int, int] = [0, 0]
+    latency_list: List[Optional[float]] = []
 
 
 @app.post("/get_info")
 def get_info(
-    req: GetInfoRequest
+    req: GetInfoRequest,
+    response_model=GetInfoResponse
 ):
     try:
-        worker.get_info(req)
-        return None
+        gpu_mem_info, latency_list = worker.get_info(req.node_list, req.timeout)
+        return GetInfoResponse(gpu_mem_info=gpu_mem_info, latency_list=latency_list)
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
