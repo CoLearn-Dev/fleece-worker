@@ -222,13 +222,16 @@ class Worker:
 
     def forward(self,
                 task_id: str,
-                is_new_task: bool,
                 plan: List[Tuple[str, List[str]]],
                 step: int,
                 round: int,
-                payload: List
+                payload: List,
+                max_gen_len: int,
+                temperature: float,
+                top_p: float,
                 ):
         index = step
+        is_new_task = round == 0
         if payload is None:
             _, kv_cache_dict = self.task_info[(task_id, step)]
             for _, kv_cache in kv_cache_dict.items():
@@ -243,7 +246,6 @@ class Worker:
                     f"{plan[index+1][0]}/forward",
                     json={
                         "task_id": task_id,
-                        "is_new_task": is_new_task,
                         "plan": plan,
                         "step": step+1,
                     },
@@ -296,9 +298,13 @@ class Worker:
         self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
         # last node
         if index == len(plan)-1:
-            # TODO temperature
-            next_token = torch.argmax(h[:, -1], dim=-1)
-            if start_pos > 4000:
+            if temperature > 0:
+                probs = torch.softmax(h[:, -1] / temperature, dim=-1)
+                next_token = sample_top_p(probs, top_p)
+            else:
+                next_token = torch.argmax(h[:, -1], dim=-1)
+            next_token = next_token.reshape(-1)
+            if start_pos > max_gen_len:
                 next_token = torch.tensor([2])  # FIXME fake max length limit
             print(next_token)
             # eos_id
@@ -308,11 +314,13 @@ class Worker:
                     f"{plan[0][0]}/forward",
                     json={
                         "task_id": task_id,
-                        "is_new_task": False,
                         "plan": plan,
                         "step": 0,
                         "round": round+1,
                         "payload": [next_token.tolist()],
+                        "max_gen_len": max_gen_len,
+                        "temperature": temperature,
+                        "top_p": top_p,
                     },
                     exec=executor_forward)
             else:
@@ -320,7 +328,6 @@ class Worker:
                     f"{plan[0][0]}/forward",
                     json={
                         "task_id": task_id,
-                        "is_new_task": False,
                         "plan": plan,
                         "step": 0,
                     },
@@ -342,11 +349,13 @@ class Worker:
                 f"{plan[index+1][0]}/forward",
                 json={
                     "task_id": task_id,
-                    "is_new_task": is_new_task,
                     "plan": plan,
                     "step": step+1,
                     "round": round,
                     "payload": h.tolist(),
+                    "max_gen_len": max_gen_len,
+                    "temperature": temperature,
+                    "top_p": top_p,
                 },
                 exec=executor_forward)
             # update
@@ -364,3 +373,29 @@ class Worker:
         gpu_mem_info = torch.cuda.mem_get_info()
         latency_list = measure_latency(node_list, timeout)
         return gpu_mem_info, latency_list
+
+
+def sample_top_p(probs, p):
+    """
+    Perform top-p (nucleus) sampling on a probability distribution.
+
+    Args:
+        probs (torch.Tensor): Probability distribution tensor.
+        p (float): Probability threshold for top-p sampling.
+
+    Returns:
+        torch.Tensor: Sampled token indices.
+
+    Note:
+        Top-p sampling selects the smallest set of tokens whose cumulative probability mass
+        exceeds the threshold p. The distribution is renormalized based on the selected tokens.
+
+    """
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    mask = probs_sum - probs_sort > p
+    probs_sort[mask] = 0.0
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    next_token = torch.multinomial(probs_sort, num_samples=1)
+    next_token = torch.gather(probs_idx, -1, next_token)
+    return next_token
