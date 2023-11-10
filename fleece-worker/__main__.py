@@ -45,7 +45,7 @@ class ForwardRequest(BaseModel):
     step: int
     round: int = -1
     payload: Optional[List] = None
-    max_gen_len: int = 1024
+    max_total_len: int = 1024
     temperature: float = 0.0
     top_p: float = 0.9
 
@@ -56,7 +56,7 @@ def forward(
     background_tasks: BackgroundTasks
 ):
     try:
-        background_tasks.add_task(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_gen_len, req.temperature, req.top_p)
+        background_tasks.add_task(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p)
         return None
     except Exception as e:
         print(e)

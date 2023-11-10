@@ -11,7 +11,7 @@ import time
 import socket
 from urllib.parse import urlparse
 
-torch.set_default_device('cpu')
+torch.set_default_device("cpu")
 torch.set_default_dtype(torch.float16)
 
 llama_2_7b_args = {"dim": 4096, "multiple_of": 256, "n_heads": 32, "n_layers": 32, "norm_eps": 1e-06, "vocab_size": 32000}
@@ -167,6 +167,8 @@ class Worker:
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
         self.mutex = threading.Lock()
+        self.task_prompt_tokens: Dict[str, torch.Tensor] = dict()
+        self.task_eos_reached: Dict[str, torch.Tensor] = dict()
 
     def fetch_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
@@ -226,13 +228,17 @@ class Worker:
                 step: int,
                 round: int,
                 payload: List,
-                max_gen_len: int,
+                max_total_len: int,
                 temperature: float,
                 top_p: float,
                 ):
         index = step
         is_new_task = round == 0
         if payload is None:
+            if index == 0:
+                del self.task_prompt_tokens[task_id]
+            if index == len(plan)-1:
+                del self.task_eos_reached[task_id]
             _, kv_cache_dict = self.task_info[(task_id, step)]
             for _, kv_cache in kv_cache_dict.items():
                 k_cache, v_cache = kv_cache
@@ -251,21 +257,37 @@ class Worker:
                     },
                     exec=executor_forward)
             return
-        # first node
-        if index == 0:
-            # bsz=1
-            if is_new_task:
-                pass  # TODO batch
-            h = torch.tensor(payload, dtype=torch.int64, device="cuda")
-            _bsz, seqlen = h.shape
-        else:
-            h = torch.tensor(payload, dtype=torch.float16, device="cuda")
-            _bsz, seqlen, _ = h.shape
-        # forward
+
         if is_new_task:
             self.task_info[(task_id, step)] = (0, dict())
-
         start_pos, kv_cache_dict = self.task_info[(task_id, step)]
+
+        # first node
+        if index == 0:
+            bsz = len(payload)
+            if is_new_task:
+                min_prompt_len = min(len(t) for t in payload)
+                self.task_prompt_tokens[task_id] = payload
+                tokens = torch.zeros((bsz, min_prompt_len), dtype=torch.long)
+                for k, t in enumerate(payload):
+                    tokens[k, :] = torch.tensor(t[:min_prompt_len], dtype=torch.long)
+                h = tokens.to("cuda")
+            else:
+                prompt_tokens = self.task_prompt_tokens[task_id]
+                tokens = torch.zeros((bsz, 1), dtype=torch.long)
+                for k, t in enumerate(prompt_tokens):
+                    if len(t) > start_pos:
+                        tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long)
+                    else:
+                        tokens[k, :] = torch.tensor([payload[k]], dtype=torch.long)
+                h = tokens.to("cuda")
+            # print(h)
+            bsz, seqlen = h.shape
+        else:
+            h = torch.tensor(payload, dtype=torch.float16, device="cuda")
+            bsz, seqlen, _ = h.shape
+
+        # forward
         freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
         mask = None
         if seqlen > 1:
@@ -296,6 +318,7 @@ class Worker:
                     else:
                         raise NotImplementedError("Unknown layers")
         self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
+
         # last node
         if index == len(plan)-1:
             if temperature > 0:
@@ -304,11 +327,16 @@ class Worker:
             else:
                 next_token = torch.argmax(h[:, -1], dim=-1)
             next_token = next_token.reshape(-1)
-            if start_pos > max_gen_len:
-                next_token = torch.tensor([2])  # FIXME fake max length limit
+            if start_pos > max_total_len:
+                next_token = torch.tensor([2] * bsz)  # FIXME fake max length limit
             print(next_token)
-            # eos_id
-            if next_token[0] != 2:
+            next_token = next_token.to("cpu")
+
+            # eos_reached
+            if is_new_task:
+                self.task_eos_reached[task_id] = torch.tensor([False] * bsz)
+            self.task_eos_reached[task_id] |= next_token == 2  # eos_id
+            if not all(self.task_eos_reached[task_id]):
                 # next node
                 send_request(
                     f"{plan[0][0]}/forward",
@@ -317,8 +345,8 @@ class Worker:
                         "plan": plan,
                         "step": 0,
                         "round": round+1,
-                        "payload": [next_token.tolist()],
-                        "max_gen_len": max_gen_len,
+                        "payload": next_token.tolist(),
+                        "max_total_len": max_total_len,
                         "temperature": temperature,
                         "top_p": top_p,
                     },
@@ -353,7 +381,7 @@ class Worker:
                     "step": step+1,
                     "round": round,
                     "payload": h.tolist(),
-                    "max_gen_len": max_gen_len,
+                    "max_total_len": max_total_len,
                     "temperature": temperature,
                     "top_p": top_p,
                 },
