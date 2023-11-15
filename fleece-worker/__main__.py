@@ -69,6 +69,7 @@ class GetInfoRequest(BaseModel):
 
 
 class GetInfoResponse(BaseModel):
+    worker_nickname: str
     gpu_mem_info: Tuple[int, int] = [0, 0]
     latency_list: List[Optional[float]] = []
 
@@ -79,8 +80,8 @@ def get_info(
     response_model=GetInfoResponse
 ):
     try:
-        gpu_mem_info, latency_list = worker.get_info(req.node_list, req.timeout)
-        return GetInfoResponse(gpu_mem_info=gpu_mem_info, latency_list=latency_list)
+        worker_nickname, gpu_mem_info, latency_list = worker.get_info(req.node_list, req.timeout)
+        return GetInfoResponse(worker_nickname=worker_nickname, gpu_mem_info=gpu_mem_info, latency_list=latency_list)
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -90,6 +91,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--controller-url")
     parser.add_argument("-w", "--worker-url")
+    parser.add_argument("--worker-nickname")
     args = parser.parse_args()
     if args.worker_url is not None:
         worker.worker_url = args.worker_url
@@ -108,6 +110,8 @@ if __name__ == '__main__':
                               "worker_url": worker.worker_url,
                           })
         worker.worker_token = json.loads(r.content)["access_token"]
+    if args.worker_nickname is not None:
+        worker.worker_nickname = args.worker_nickname
     uvicorn.run(app, host="0.0.0.0", port=port)
     if args.controller_url is not None:
         r = requests.post(f"{args.controller_url}/deregister_worker",

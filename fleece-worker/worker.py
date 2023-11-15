@@ -163,6 +163,7 @@ class Worker:
         # self.mirror_url = mirror_url
         self.controller_url = None
         self.worker_token = None
+        self.worker_nickname = worker_url
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
@@ -400,7 +401,7 @@ class Worker:
     def get_info(self, node_list, timeout):
         gpu_mem_info = torch.cuda.mem_get_info()
         latency_list = measure_latency(node_list, timeout)
-        return gpu_mem_info, latency_list
+        return self.worker_nickname, gpu_mem_info, latency_list
 
 
 def sample_top_p(probs, p):
