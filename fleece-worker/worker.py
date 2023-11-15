@@ -358,7 +358,7 @@ class Worker:
             next_token = next_token.reshape(-1)
             if start_pos > max_total_len:
                 next_token = torch.tensor([2] * bsz)  # FIXME fake max length limit
-            print(next_token)
+            # print(next_token)
             next_token = next_token.to("cpu")
 
             # eos_reached
