@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Set
 import os
 import torch
 from torch import nn
@@ -103,15 +103,23 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 executor_forward = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 
 
-def requests_post(url, headers=None, json=None):
-    requests.post(url, headers=headers, json=json)
+def requests_post(url, headers=None, json=None, worker=None):
+    try:
+        r = requests.post(url, headers=headers, json=json)
+        assert r.status_code == 200
+    except:
+        if worker is not None:
+            if "task_id" in json:
+                worker.cancel_task(json["task_id"])
+            if "t_id" in json:
+                worker.cancel_task(json["t_id"])
 
 
-def send_request(url, headers=None, json=None, exec=None):
+def send_request(url, headers=None, json=None, exec=None, worker=None):
     if exec is None:
-        executor.submit(requests_post, url, headers, json)
+        executor.submit(requests_post, url, headers, json, worker)
     else:
-        exec.submit(requests_post, url, headers, json)
+        exec.submit(requests_post, url, headers, json, worker)
 
 
 executor_latency_test = concurrent.futures.ThreadPoolExecutor(max_workers=40)
@@ -170,6 +178,8 @@ class Worker:
         self.mutex = threading.Lock()
         self.task_prompt_tokens: Dict[str, torch.Tensor] = dict()
         self.task_eos_reached: Dict[str, torch.Tensor] = dict()
+        self.task_local_steps: Dict[str, List[int]] = dict()
+        self.canceled_task: Set[str] = set()
 
     def fetch_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
@@ -223,6 +233,27 @@ class Worker:
             del self.layers[full_layer_name]
             torch.cuda.empty_cache()
 
+    def cancel_task(self, task_id: str):
+        self.del_task(task_id)
+        self.canceled_task.add(task_id)
+
+    def del_task(self, task_id: str):
+        steps = self.task_local_steps.pop(task_id, None)
+        if steps is None:
+            return
+        if task_id in self.task_prompt_tokens:
+            del self.task_prompt_tokens[task_id]
+        if task_id in self.task_eos_reached:
+            del self.task_eos_reached[task_id]
+        for step in steps:
+            _, kv_cache_dict = self.task_info[(task_id, step)]
+            for _, kv_cache in kv_cache_dict.items():
+                k_cache, v_cache = kv_cache
+                del_tensor(k_cache)
+                del_tensor(v_cache)
+            del self.task_info[(task_id, step)]
+        torch.cuda.empty_cache()
+
     def forward(self,
                 task_id: str,
                 plan: List[Tuple[str, List[str]]],
@@ -235,18 +266,8 @@ class Worker:
                 ):
         index = step
         is_new_task = round == 0
-        if payload is None:
-            if index == 0:
-                del self.task_prompt_tokens[task_id]
-            if index == len(plan)-1:
-                del self.task_eos_reached[task_id]
-            _, kv_cache_dict = self.task_info[(task_id, step)]
-            for _, kv_cache in kv_cache_dict.items():
-                k_cache, v_cache = kv_cache
-                del_tensor(k_cache)
-                del_tensor(v_cache)
-            del self.task_info[(task_id, step)]
-            torch.cuda.empty_cache()
+        if payload is None or task_id in self.canceled_task:
+            self.del_task(task_id)
             if index < len(plan)-1:
                 # next node
                 send_request(
@@ -260,7 +281,14 @@ class Worker:
             return
 
         if is_new_task:
+            if task_id in self.task_local_steps:
+                self.task_local_steps[task_id].append(step)
+            else:
+                self.task_local_steps[task_id] = [step]
             self.task_info[(task_id, step)] = (0, dict())
+        else:
+            if not task_id in self.task_local_steps:
+                return
         start_pos, kv_cache_dict = self.task_info[(task_id, step)]
 
         # first node
@@ -351,8 +379,10 @@ class Worker:
                         "temperature": temperature,
                         "top_p": top_p,
                     },
-                    exec=executor_forward)
+                    exec=executor_forward,
+                    worker=self)
             else:
+                self.cancel_task(task_id)
                 send_request(
                     f"{plan[0][0]}/forward",
                     json={
@@ -371,7 +401,8 @@ class Worker:
                         "plan_current_step": step,
                         "plan_current_round": round,
                         "output_tokens": next_token.tolist(),
-                    })
+                    },
+                    worker=self)
         else:
             # next node
             send_request(
@@ -386,7 +417,8 @@ class Worker:
                     "temperature": temperature,
                     "top_p": top_p,
                 },
-                exec=executor_forward)
+                exec=executor_forward,
+                worker=self)
             # update
             if self.controller_url is not None:
                 send_request(
@@ -396,7 +428,8 @@ class Worker:
                         "t_id": task_id,
                         "plan_current_step": step,
                         "plan_current_round": round,
-                    })
+                    },
+                    worker=self)
 
     def get_info(self, node_list, timeout):
         gpu_mem_info = torch.cuda.mem_get_info()
