@@ -68,10 +68,12 @@ def get_gpu_total_mem(gpu_type: str) -> float:
     # return mem
     if gpu_type == "A10G":
         return 23827316736
+    if gpu_type == "A100":
+        return 84986691584
     raise NotImplementedError
 
 
-def get_computation_time(full_layer_name: str, gpu_type: str) -> (float, float):  # return (loading_time, inference_time) ms
+def get_computation_time(full_layer_name: str, gpu_type: str) -> (float, float):  # return (loading_time, inference_time) ms # Note: loading_time is related to the disk speed
     model_name, layer_name = parse_layer_name(full_layer_name)
     if gpu_type == "A10G":
         if model_name.startswith("llama-2-7b"):
@@ -96,6 +98,31 @@ def get_computation_time(full_layer_name: str, gpu_type: str) -> (float, float):
                 return (277.843, 1.159)
             else:
                 raise NotImplementedError("Unknown layers")
+
+    if gpu_type == "A100":
+        if model_name.startswith("llama-2-7b"):
+            if layer_name == "tok_embeddings":
+                return (164.065, 0.074)
+            elif layer_name.startswith("layer"):
+                return (265.658, 0.675)
+            elif layer_name == "norm":
+                return (0.936, 0.113)
+            elif layer_name == "output":
+                return (166.615, 0.203)
+            else:
+                raise NotImplementedError("Unknown layers")
+        elif model_name.startswith("llama-2-70b"):
+            if layer_name == "tok_embeddings":
+                return (330.723, 0.074)
+            elif layer_name.startswith("layer"):
+                return (749.449, 1.211)
+            elif layer_name == "norm":
+                return (0.942, 0.124)
+            elif layer_name == "output":
+                return (188.085, 0.347)
+            else:
+                raise NotImplementedError("Unknown layers")
+
     raise NotImplementedError
 
 # status
