@@ -202,6 +202,8 @@ class Worker:
                 th = executor.submit(self.fetch_layer, full_layer_name)
                 ths.append((full_layer_name, th))
             for full_layer_name, th in ths:
+                st_mem, _ = torch.cuda.mem_get_info()
+                st = time.monotonic()
                 path = th.result()
                 model_name, layer_name = parse_layer_name(full_layer_name)
                 if model_name.startswith("llama-2-7b"):
@@ -225,6 +227,10 @@ class Worker:
                 l.load_state_dict(torch.load(path, map_location="cpu"))
                 l.to("cuda")
                 self.layers[full_layer_name] = l
+                torch.cuda.empty_cache()
+                en = time.monotonic()
+                en_mem, _ = torch.cuda.mem_get_info()
+                print(f"preload, layer:{full_layer_name}", (en-st)*1000, st_mem-en_mem)
 
     def unload_layers(self, layer_names: List[str]):
         for full_layer_name in layer_names:
@@ -329,23 +335,38 @@ class Worker:
         self.preload_layers(layer_names)  # preload
         with torch.inference_mode():
             with self.mutex:
+                st_mem, _ = torch.cuda.mem_get_info()
+                lst = 9999999999.0
                 for full_layer_name in layer_names:
+                    st = time.monotonic()
                     model_name, layer_name = parse_layer_name(full_layer_name)
                     if layer_name == "tok_embeddings":
                         h = self.layers[full_layer_name](h)
+                        torch.cuda.synchronize()
                     elif layer_name.startswith("layers."):
+                        if lst == 9999999999.0:
+                            lst = time.monotonic()
                         if is_new_task:
                             kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
                         else:
                             kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
                         h = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache)
                         kv_cache_dict[full_layer_name] = kv_cache
+                        if layer_name == "layers.9":
+                            st = lst
+                            torch.cuda.synchronize()
                     elif layer_name == "norm":
                         h = self.layers[full_layer_name](h)
+                        torch.cuda.synchronize()
                     elif layer_name == "output":
                         h = self.layers[full_layer_name](h)
+                        torch.cuda.synchronize()
                     else:
                         raise NotImplementedError("Unknown layers")
+                    en = time.monotonic()
+                    print(f"forward, layer:{full_layer_name}", (en-st)*1000)
+                en_mem, _ = torch.cuda.mem_get_info()
+                print(f"forward,mem layer:{full_layer_name}", st_mem-en_mem)
         self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
 
         # last node
