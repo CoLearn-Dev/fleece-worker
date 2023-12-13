@@ -128,26 +128,42 @@ def get_computation_time(full_layer_name: str, gpu_type: str) -> (float, float):
 # status
 
 
+nodes_list = ["A10_0", "A10_1", "A10_2", "A10_3", "A100_0", "A100_1"]
+
+
 def get_nodes() -> List[str]:
     # return node_num
+    return nodes_list
     raise NotImplementedError
 
 
 def get_node_mem(w_id: str) -> float:
     # return mem
+    return 0
     raise NotImplementedError
 
 
 def get_node_gpu_type(w_id: str) -> str:
     # return gpu_type
+    if w_id.startswith("A10_"):
+        return "A10G"
+    if w_id.startswith("A100_"):
+        return "A100"
     raise NotImplementedError
 
 
 def get_node_loaded_layers(w_id: str) -> List[str]:
     # return layer_name
+    return []
     raise NotImplementedError
 
 
 def get_network_latency(from_w_id: str, to_w_id: str) -> float:
     # return latency
+    if from_w_id.startswith("A10_") and to_w_id.startswith("A100_"):
+        return 2.0
+    if from_w_id.startswith("A10_") and to_w_id.startswith("A10_"):
+        return 1.0
+    if from_w_id.startswith("A100_") and to_w_id.startswith("A100_"):
+        return 1.0
     raise NotImplementedError
