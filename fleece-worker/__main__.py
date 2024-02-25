@@ -91,6 +91,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--controller-url")
     parser.add_argument("-w", "--worker-url")
+    parser.add_argument("-t", "--api-token")
     parser.add_argument("--worker-nickname")
     args = parser.parse_args()
     if args.worker_url is not None:
@@ -103,16 +104,24 @@ if __name__ == '__main__':
     else:
         worker.worker_url = "http://127.0.0.1:8080"
         port = 8080
-    if args.controller_url is not None:
-        worker.controller_url = args.controller_url
-        r = requests.post(f"{args.controller_url}/register_worker",
-                          json={
-                              "worker_url": worker.worker_url,
-                          })
-        worker.worker_token = json.loads(r.content)["access_token"]
+    if args.api_token is not None:
+        worker.api_token = args.api_token
     if args.worker_nickname is not None:
         worker.worker_nickname = args.worker_nickname
+    if args.controller_url is not None:
+        worker.controller_url = args.controller_url
+        data = {
+            "url": worker.worker_url,
+        }
+        if worker.worker_nickname is not None:
+            data["nickname"] = worker.worker_nickname
+        r = requests.post(f"{args.controller_url}/register_worker",
+                          json=data,
+                          headers={"api-token": worker.api_token})
     uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)
     if args.controller_url is not None:
         r = requests.post(f"{args.controller_url}/deregister_worker",
-                          headers={"worker-token": worker.worker_token})
+                          json={
+                              "url": worker.worker_url,
+                          },
+                          headers={"api-token": worker.api_token})

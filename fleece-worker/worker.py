@@ -173,7 +173,7 @@ class Worker:
         self.worker_url = worker_url
         # self.mirror_url = mirror_url
         self.controller_url = None
-        self.worker_token = None
+        self.api_token = None
         self.worker_nickname = worker_url
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
