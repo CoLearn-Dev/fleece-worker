@@ -121,11 +121,13 @@ if __name__ == '__main__':
         r = requests.post(f"{args.controller_url}/register_worker",
                           json=data,
                           headers={"api-token": worker.api_token})
+        res = json.loads(r.content)
+        worker.worker_id = res["id"]
         worker.start_heartbeat_daemon()
     uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)
-    if args.controller_url is not None:
-        r = requests.post(f"{args.controller_url}/deregister_worker",
-                          json={
-                              "url": worker.worker_url,
-                          },
-                          headers={"api-token": worker.api_token})
+    # if args.controller_url is not None:
+    #     r = requests.post(f"{args.controller_url}/deregister_worker",
+    #                       json={
+    #                           "url": worker.worker_url,
+    #                       },
+    #                       headers={"api-token": worker.api_token})

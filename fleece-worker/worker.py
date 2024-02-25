@@ -113,10 +113,7 @@ def requests_post(url, headers=None, json=None, worker=None):
         assert r.status_code == 200
     except:
         if worker is not None:
-            if "task_id" in json:
-                worker.cancel_task(json["task_id"])
-            if "t_id" in json:
-                worker.cancel_task(json["t_id"])
+            worker.cancel_task(json["task_id"])
 
 
 def send_request(url, headers=None, json=None, exec=None, worker=None):
@@ -167,15 +164,15 @@ def measure_latency(node_list: List[str], timeout):
 class Worker:
     def __init__(
             self,
-            worker_url: str = None,
+            worker_id: str = None,
             # mirror_url: str = "TODO",
             cache_dir: str = "~/.cache/fleece-worker/models",
     ):
-        self.worker_url = worker_url
+        self.worker_id = worker_id
         # self.mirror_url = mirror_url
         self.controller_url = None
         self.api_token = None
-        self.worker_nickname = worker_url
+        self.worker_nickname = worker_id
         self.heartbeat_interval = 300
         self.tm_pubkeys = {}
         self.cache_dir = os.path.expanduser(cache_dir)
@@ -418,9 +415,9 @@ class Worker:
             if self.controller_url is not None:
                 send_request(
                     f"{self.controller_url}/update_task",
-                    headers={"api-token": self.api_token},
+                    headers={"worker-id": self.worker_id, "api-token": self.api_token},
                     json={
-                        "t_id": task_id,
+                        "task_id": task_id,
                         "plan_current_step": step,
                         "plan_current_round": round,
                         "output_tokens": next_token.tolist(),
@@ -446,9 +443,9 @@ class Worker:
             if self.controller_url is not None:
                 send_request(
                     f"{self.controller_url}/update_task",
-                    headers={"api-token": self.api_token},
+                    headers={"worker-id": self.worker_id, "api-token": self.api_token},
                     json={
-                        "t_id": task_id,
+                        "task_id": task_id,
                         "plan_current_step": step,
                         "plan_current_round": round,
                     },
@@ -461,11 +458,11 @@ class Worker:
 
     def send_heartbeat(self):
         data = {
-            "url": self.worker_url,
+
         }
         r = requests.post(f"{self.controller_url}/worker_heartbeat",
                           json=data,
-                          headers={"api-token": self.api_token})
+                          headers={"worker-id": self.worker_id, "api-token": self.api_token})
         res = json.loads(r.content)
         self.tm_pubkeys = res["pubkeys"]
 
