@@ -389,10 +389,12 @@ class Worker:
                     model_name, layer_name = parse_layer_name(full_layer_name)
                     if model_name.startswith("dummy"):
                         if layer_name == "output":
-                            h = torch.rand((bsz, 1, 32000), dtype=torch.float16)
-                            if round >= 32:
+                            h = torch.zeros((bsz, 1, 32000), dtype=torch.float16)
+                            h[:, :, round+10] = 1.0
+                            if round >= 320:
                                 h = torch.zeros((bsz, 1, 32000), dtype=torch.float16)
                                 h[:, :, 2] = 1.0
+                            # time.sleep(0.01)
                         continue
                     if layer_name == "tok_embeddings":
                         h = self.layers[full_layer_name](h)
