@@ -18,7 +18,10 @@ llama_2_7b_args = {"dim": 4096, "multiple_of": 256, "n_heads": 32, "n_layers": 3
 llama_2_13b_args = {"dim": 5120, "multiple_of": 256, "n_heads": 40, "n_layers": 40, "norm_eps": 1e-05, "vocab_size": 32000}
 llama_2_70b_args = {"dim": 8192, "multiple_of": 4096, "ffn_dim_multiplier": 1.3, "n_heads": 64, "n_kv_heads": 8, "n_layers": 80, "norm_eps": 1e-05, "vocab_size": 32000}
 
-global_freqs_cis = precompute_freqs_cis(128, 4096).to("cuda")
+if torch.cuda.is_available():
+    global_freqs_cis = precompute_freqs_cis(128, 4096).to("cuda")
+else:
+    global_freqs_cis = precompute_freqs_cis(128, 4096)
 # tokenizer = Tokenizer(model_path="/home/ubuntu/llama/tokenizer.model")
 # print(tokenizer.bos_id) 1
 # print(tokenizer.eos_id) 2
@@ -183,6 +186,8 @@ class Worker:
 
     def fetch_layer(self, full_layer_name):
         model_name, layer_name = parse_layer_name(full_layer_name)
+        if model_name.startswith("dummy"):
+            return None
         path = os.path.join(self.cache_dir, model_name, f"{layer_name}.pt")
         if not os.path.exists(path):  # TODO lock
             os.makedirs(os.path.join(self.cache_dir, model_name), exist_ok=True)
@@ -204,6 +209,8 @@ class Worker:
             for full_layer_name, th in ths:
                 path = th.result()
                 model_name, layer_name = parse_layer_name(full_layer_name)
+                if model_name.startswith("dummy"):
+                    continue
                 if model_name.startswith("llama-2-7b"):
                     model_args = ModelArgs(**llama_2_7b_args)
                 elif model_name.startswith("llama-2-13b"):
@@ -300,7 +307,10 @@ class Worker:
                 tokens = torch.zeros((bsz, min_prompt_len), dtype=torch.long)
                 for k, t in enumerate(payload):
                     tokens[k, :] = torch.tensor(t[:min_prompt_len], dtype=torch.long)
-                h = tokens.to("cuda")
+                if torch.cuda.is_available():
+                    h = tokens.to("cuda")
+                else:
+                    h = tokens
             else:
                 prompt_tokens = self.task_prompt_tokens[task_id]
                 tokens = torch.zeros((bsz, 1), dtype=torch.long)
@@ -309,7 +319,10 @@ class Worker:
                         tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long)
                     else:
                         tokens[k, :] = torch.tensor([payload[k]], dtype=torch.long)
-                h = tokens.to("cuda")
+                if torch.cuda.is_available():
+                    h = tokens.to("cuda")
+                else:
+                    h = tokens
             # print(h)
             bsz, seqlen = h.shape
         else:
@@ -331,6 +344,13 @@ class Worker:
             with self.mutex:
                 for full_layer_name in layer_names:
                     model_name, layer_name = parse_layer_name(full_layer_name)
+                    if model_name.startswith("dummy"):
+                        if layer_name == "output":
+                            h = torch.rand((bsz, 1, 32000), dtype=torch.float16)
+                            if round >= 32:
+                                h = torch.zeros((bsz, 1, 32000), dtype=torch.float16)
+                                h[:, :, 2] = 1.0
+                        continue
                     if layer_name == "tok_embeddings":
                         h = self.layers[full_layer_name](h)
                     elif layer_name.startswith("layers."):

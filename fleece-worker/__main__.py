@@ -112,7 +112,7 @@ if __name__ == '__main__':
         worker.worker_token = json.loads(r.content)["access_token"]
     if args.worker_nickname is not None:
         worker.worker_nickname = args.worker_nickname
-    uvicorn.run(app, host="0.0.0.0", port=port, access_log=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)
     if args.controller_url is not None:
         r = requests.post(f"{args.controller_url}/deregister_worker",
                           headers={"worker-token": worker.worker_token})
