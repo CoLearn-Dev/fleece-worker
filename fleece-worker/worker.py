@@ -10,6 +10,7 @@ import concurrent.futures
 import time
 import socket
 from urllib.parse import urlparse
+import json
 
 torch.set_default_device("cpu")
 torch.set_default_dtype(torch.float16)
@@ -175,6 +176,8 @@ class Worker:
         self.controller_url = None
         self.api_token = None
         self.worker_nickname = worker_url
+        self.heartbeat_interval = 300
+        self.tm_pubkeys = {}
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
@@ -415,7 +418,7 @@ class Worker:
             if self.controller_url is not None:
                 send_request(
                     f"{self.controller_url}/update_task",
-                    headers={"worker-token": self.worker_token},
+                    headers={"api-token": self.api_token},
                     json={
                         "t_id": task_id,
                         "plan_current_step": step,
@@ -443,7 +446,7 @@ class Worker:
             if self.controller_url is not None:
                 send_request(
                     f"{self.controller_url}/update_task",
-                    headers={"worker-token": self.worker_token},
+                    headers={"api-token": self.api_token},
                     json={
                         "t_id": task_id,
                         "plan_current_step": step,
@@ -455,6 +458,25 @@ class Worker:
         gpu_mem_info = torch.cuda.mem_get_info()
         latency_list = measure_latency(node_list, timeout)
         return self.worker_nickname, gpu_mem_info, latency_list
+
+    def send_heartbeat(self):
+        data = {
+            "url": self.worker_url,
+        }
+        r = requests.post(f"{self.controller_url}/worker_heartbeat",
+                          json=data,
+                          headers={"api-token": self.api_token})
+        res = json.loads(r.content)
+        self.tm_pubkeys = res["pubkeys"]
+
+    def start_heartbeat_daemon(self):
+        def heartbeat_thread():
+            while True:
+                self.send_heartbeat()
+                time.sleep(self.heartbeat_interval)
+        heartbeat_thread = threading.Thread(target=heartbeat_thread)
+        heartbeat_thread.daemon = True
+        heartbeat_thread.start()
 
 
 def sample_top_p(probs, p):

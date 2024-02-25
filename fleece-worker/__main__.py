@@ -93,6 +93,7 @@ if __name__ == '__main__':
     parser.add_argument("-w", "--worker-url")
     parser.add_argument("-t", "--api-token")
     parser.add_argument("--worker-nickname")
+    parser.add_argument("--heartbeat-interval")
     args = parser.parse_args()
     if args.worker_url is not None:
         worker.worker_url = args.worker_url
@@ -108,6 +109,8 @@ if __name__ == '__main__':
         worker.api_token = args.api_token
     if args.worker_nickname is not None:
         worker.worker_nickname = args.worker_nickname
+    if args.heartbeat_interval is not None:
+        worker.heartbeat_interval = int(args.heartbeat_interval)
     if args.controller_url is not None:
         worker.controller_url = args.controller_url
         data = {
@@ -118,6 +121,7 @@ if __name__ == '__main__':
         r = requests.post(f"{args.controller_url}/register_worker",
                           json=data,
                           headers={"api-token": worker.api_token})
+        worker.start_heartbeat_daemon()
     uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)
     if args.controller_url is not None:
         r = requests.post(f"{args.controller_url}/deregister_worker",

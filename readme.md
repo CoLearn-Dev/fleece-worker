@@ -21,11 +21,12 @@ curl localhost:8080/forward -H 'Content-Type: application/json' -d '{"task_id":"
 ## Connect to a controller
 
 ```
-python -m fleece-worker -c <controller_url> -w <worker_url>
+python -m fleece-worker -c <controller_url> -w <worker_url> -t <api_token>
 ```
+Optional: `--worker-nickname abc`, `--heartbeat-interval 10`
 
-For example (with port forwarding `ssh -R 8080:localhost:8080 <username>@34.219.82.248`):
+For example (with port forwarding `ssh -R 8080:localhost:8080 <username>@relay-server`):
 
 ```
-python -m fleece-worker -c http://34.219.82.248:8000 -w http://127.0.0.1:8080
+python -m fleece-worker -c https://serving-api.colearn.cloud:8443 -w http://127.0.0.1:8080 -t <api_token>
 ```
