@@ -16,6 +16,7 @@ setup(
         "fastapi",
         "uvicorn",
         "requests",
+        "cryptography",
     ],
     python_requires=">=3.10",
 )

@@ -11,6 +11,8 @@ import time
 import socket
 from urllib.parse import urlparse
 import json
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes
 
 torch.set_default_device("cpu")
 torch.set_default_dtype(torch.float16)
@@ -175,6 +177,7 @@ class Worker:
         self.worker_nickname = worker_id
         self.heartbeat_interval = 300
         self.tm_pubkeys = {}
+        self.worker_urls = {}
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
@@ -261,6 +264,38 @@ class Worker:
             del self.task_info[(task_id, step)]
         torch.cuda.empty_cache()
 
+    def pull_worker_url(self):
+        r = requests.get(f"{self.controller_url}/get_worker_list",
+                         headers={"api-token": self.api_token})
+        res = json.loads(r.content)
+        for worker in res["workers"]:
+            self.worker_urls[worker["worker_id"]] = worker["url"]
+
+    def get_worker_url(self, worker_id):
+        if worker_id not in self.worker_urls:
+            self.pull_worker_url()
+        return self.worker_urls[worker_id]
+
+    def verify(self, tm_url, task_id, plan, timestamp, signature_hex):
+        public_key_bytes = bytes.fromhex(self.tm_pubkeys[tm_url])
+        public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+            ec.SECP256K1(), public_key_bytes
+        )
+        signed_bytes = task_id.encode()+str(timestamp).encode()
+        for x in plan:
+            signed_bytes += x[0].encode()
+            for y in x[1]:
+                signed_bytes += y.encode()
+        try:
+            public_key.verify(
+                bytes.fromhex(signature_hex),
+                signed_bytes,
+                ec.ECDSA(hashes.SHA256())
+            )
+            return True
+        except:
+            return False
+
     def forward(self,
                 task_id: str,
                 plan: List[Tuple[str, List[str]]],
@@ -270,7 +305,12 @@ class Worker:
                 max_total_len: int,
                 temperature: float,
                 top_p: float,
+                task_manager_url: str,
+                signature: str,
+                timestamp: int,
                 ):
+        self.verify(task_manager_url, task_id, plan, timestamp, signature)
+
         index = step
         is_new_task = round == 0
         if payload is None or task_id in self.canceled_task:
@@ -278,11 +318,14 @@ class Worker:
             if index < len(plan)-1:
                 # next node
                 send_request(
-                    f"{plan[index+1][0]}/forward",
+                    f"{self.get_worker_url(plan[index+1][0])}/forward",
                     json={
                         "task_id": task_id,
                         "plan": plan,
                         "step": step+1,
+                        "task_manager_url": task_manager_url,
+                        "signature": signature,
+                        "timestamp": timestamp,
                     },
                     exec=executor_forward)
             return
@@ -388,7 +431,7 @@ class Worker:
             if not all(self.task_eos_reached[task_id]):
                 # next node
                 send_request(
-                    f"{plan[0][0]}/forward",
+                    f"{self.get_worker_url(plan[0][0])}/forward",
                     json={
                         "task_id": task_id,
                         "plan": plan,
@@ -398,23 +441,29 @@ class Worker:
                         "max_total_len": max_total_len,
                         "temperature": temperature,
                         "top_p": top_p,
+                        "task_manager_url": task_manager_url,
+                        "signature": signature,
+                        "timestamp": timestamp,
                     },
                     exec=executor_forward,
                     worker=self)
             else:
                 self.cancel_task(task_id)
                 send_request(
-                    f"{plan[0][0]}/forward",
+                    f"{self.get_worker_url(plan[0][0])}/forward",
                     json={
                         "task_id": task_id,
                         "plan": plan,
                         "step": 0,
+                        "task_manager_url": task_manager_url,
+                        "signature": signature,
+                        "timestamp": timestamp,
                     },
                     exec=executor_forward)
             # update
-            if self.controller_url is not None:
+            if task_manager_url is not None:
                 send_request(
-                    f"{self.controller_url}/update_task",
+                    f"{task_manager_url}/update_task",
                     headers={"worker-id": self.worker_id, "api-token": self.api_token},
                     json={
                         "task_id": task_id,
@@ -426,7 +475,7 @@ class Worker:
         else:
             # next node
             send_request(
-                f"{plan[index+1][0]}/forward",
+                f"{self.get_worker_url(plan[index+1][0])}/forward",
                 json={
                     "task_id": task_id,
                     "plan": plan,
@@ -436,13 +485,16 @@ class Worker:
                     "max_total_len": max_total_len,
                     "temperature": temperature,
                     "top_p": top_p,
+                    "task_manager_url": task_manager_url,
+                    "signature": signature,
+                    "timestamp": timestamp,
                 },
                 exec=executor_forward,
                 worker=self)
             # update
-            if self.controller_url is not None:
+            if task_manager_url is not None:
                 send_request(
-                    f"{self.controller_url}/update_task",
+                    f"{task_manager_url}/update_task",
                     headers={"worker-id": self.worker_id, "api-token": self.api_token},
                     json={
                         "task_id": task_id,

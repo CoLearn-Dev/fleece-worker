@@ -48,6 +48,9 @@ class ForwardRequest(BaseModel):
     max_total_len: int = 1024
     temperature: float = 0.0
     top_p: float = 0.9
+    task_manager_url: str
+    signature: str
+    timestamp: int
 
 
 @app.post("/forward")
@@ -56,7 +59,8 @@ def forward(
     background_tasks: BackgroundTasks
 ):
     try:
-        background_tasks.add_task(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p)
+        background_tasks.add_task(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p,
+                                  req.task_manager_url, req.signature, req.timestamp)
         return None
     except Exception as e:
         print(e)
@@ -123,6 +127,7 @@ if __name__ == '__main__':
                           headers={"api-token": worker.api_token})
         res = json.loads(r.content)
         worker.worker_id = res["id"]
+        worker.pull_worker_url()
         worker.start_heartbeat_daemon()
     uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)
     # if args.controller_url is not None:
