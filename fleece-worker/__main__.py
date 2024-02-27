@@ -48,9 +48,9 @@ class ForwardRequest(BaseModel):
     max_total_len: int = 1024
     temperature: float = 0.0
     top_p: float = 0.9
-    task_manager_url: str
-    signature: str
-    timestamp: int
+    task_manager_url: Optional[str] = None
+    signature: Optional[str] = None
+    timestamp: Optional[int] = None
 
 
 @app.post("/forward")

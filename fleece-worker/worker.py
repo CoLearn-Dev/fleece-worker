@@ -109,20 +109,26 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 executor_forward = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 
 
-def requests_post(url, headers=None, json=None, worker=None):
+def requests_post(url, headers=None, json=None, worker=None, to_worker_id=None):
     try:
+        if to_worker_id is not None:
+            st = time.monotonic()
         r = requests.post(url, headers=headers, json=json)
         assert r.status_code == 200
+        if to_worker_id is not None:
+            en = time.monotonic()
+            latency = (en-st)*1000
+            worker.perf_network.append((to_worker_id, latency))
     except:
         if worker is not None:
             worker.cancel_task(json["task_id"])
 
 
-def send_request(url, headers=None, json=None, exec=None, worker=None):
+def send_request(url, headers=None, json=None, exec=None, worker=None, to_worker_id=None):
     if exec is None:
-        executor.submit(requests_post, url, headers, json, worker)
+        executor.submit(requests_post, url, headers, json, worker, to_worker_id)
     else:
-        exec.submit(requests_post, url, headers, json, worker)
+        exec.submit(requests_post, url, headers, json, worker, to_worker_id)
 
 
 executor_latency_test = concurrent.futures.ThreadPoolExecutor(max_workers=40)
@@ -178,6 +184,9 @@ class Worker:
         self.heartbeat_interval = 300
         self.tm_pubkeys = {}
         self.worker_urls = {}
+        self.perf_computation = []
+        self.perf_network = []
+
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
@@ -385,6 +394,8 @@ class Worker:
         self.preload_layers(layer_names)  # preload
         with torch.inference_mode():
             with self.mutex:
+                input_shape = h.shape
+                st = time.monotonic()
                 for full_layer_name in layer_names:
                     model_name, layer_name = parse_layer_name(full_layer_name)
                     if model_name.startswith("dummy"):
@@ -411,6 +422,9 @@ class Worker:
                         h = self.layers[full_layer_name](h)
                     else:
                         raise NotImplementedError("Unknown layers")
+                en = time.monotonic()
+                latency = (en-st)*1000
+                self.perf_computation.append(((str(layer_names), str(list(input_shape))), latency))
         self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
 
         # last node
@@ -448,7 +462,8 @@ class Worker:
                         "timestamp": timestamp,
                     },
                     exec=executor_forward,
-                    worker=self)
+                    worker=self,
+                    to_worker_id=plan[0][0])
             else:
                 self.cancel_task(task_id)
                 send_request(
@@ -492,7 +507,8 @@ class Worker:
                     "timestamp": timestamp,
                 },
                 exec=executor_forward,
-                worker=self)
+                worker=self,
+                to_worker_id=plan[index+1][0])
             # update
             if task_manager_url is not None:
                 send_request(
@@ -512,10 +528,36 @@ class Worker:
 
     def send_heartbeat(self):
         data = {
-
+            "perf_computation": [],
+            "perf_network": []
         }
+
+        print(self.perf_computation)
+        s = {}
+        for k, v in self.perf_computation:
+            if k not in s:
+                s[k] = [v, 1]
+            else:
+                s[k][0] += v
+                s[k][1] += 1
+        for k, v in s.items():
+            layers, input_shape = k
+            avg_latency = v[0]/v[1]
+            data["perf_computation"].append({"layers": layers, "input_shape": input_shape, "latency": avg_latency})
+        print(self.perf_network)
+        s = {}
+        for k, v in self.perf_network:
+            if k not in s:
+                s[k] = [v, 1]
+            else:
+                s[k][0] += v
+                s[k][1] += 1
+        for k, v in s.items():
+            avg_latency = v[0]/v[1]
+            data["perf_network"].append({"to_worker_id": k, "latency": avg_latency})
+
         r = requests.post(f"{self.controller_url}/worker_heartbeat",
-                          json=data,
+                          json={"info_update": json.dumps(data)},
                           headers={"worker-id": self.worker_id, "api-token": self.api_token})
         res = json.loads(r.content)
         self.tm_pubkeys = res["pubkeys"]
