@@ -165,7 +165,6 @@ def measure_latency(node_list: List[str], timeout):
     ans = []
     for job in jobs:
         ans.append(job.result())
-    print(ans)
     return ans
 
 
@@ -532,7 +531,6 @@ class Worker:
             "perf_network": []
         }
 
-        print(self.perf_computation)
         s = {}
         for k, v in self.perf_computation:
             if k not in s:
@@ -544,7 +542,6 @@ class Worker:
             layers, input_shape = k
             avg_latency = v[0]/v[1]
             data["perf_computation"].append({"layers": layers, "input_shape": input_shape, "latency": avg_latency})
-        print(self.perf_network)
         s = {}
         for k, v in self.perf_network:
             if k not in s:
