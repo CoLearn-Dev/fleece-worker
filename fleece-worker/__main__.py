@@ -6,6 +6,7 @@ from .worker import Worker
 import argparse
 import requests
 import json
+import torch
 
 app = FastAPI()
 worker = Worker()
@@ -122,6 +123,12 @@ if __name__ == '__main__':
         }
         if worker.worker_nickname is not None:
             data["nickname"] = worker.worker_nickname
+        if torch.cuda.is_available():
+            model = torch.cuda.get_device_name()
+            memory = torch.cuda.mem_get_info()
+            data["gpu_model"] = model
+            data["gpu_total_memory"] = memory[1]
+            data["gpu_remaining_memory"] = memory[0]
         r = requests.post(f"{args.controller_url}/register_worker",
                           json=data,
                           headers={"api-token": worker.api_token})

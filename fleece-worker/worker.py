@@ -377,8 +377,14 @@ class Worker:
             # print(h)
             bsz, seqlen = h.shape
         else:
-            h = torch.tensor(payload, dtype=torch.float16, device="cuda")
-            bsz, seqlen, _ = h.shape
+            if torch.cuda.is_available():
+                h = torch.tensor(payload, dtype=torch.float16, device="cuda")
+            else:
+                h = torch.tensor(payload, dtype=torch.float16)
+            if len(h.shape) > 2:
+                bsz, seqlen, _ = h.shape
+            else:
+                bsz, seqlen = h.shape
 
         # forward
         freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
@@ -526,7 +532,7 @@ class Worker:
         return self.worker_nickname, gpu_mem_info, latency_list
 
     def send_heartbeat(self):
-        data = {
+        perf_data = {
             "perf_computation": [],
             "perf_network": []
         }
@@ -541,7 +547,7 @@ class Worker:
         for k, v in s.items():
             layers, input_shape = k
             avg_latency = v[0]/v[1]
-            data["perf_computation"].append({"layers": layers, "input_shape": input_shape, "latency": avg_latency})
+            perf_data["perf_computation"].append({"layers": layers, "input_shape": input_shape, "latency": avg_latency})
         s = {}
         for k, v in self.perf_network:
             if k not in s:
@@ -551,10 +557,14 @@ class Worker:
                 s[k][1] += 1
         for k, v in s.items():
             avg_latency = v[0]/v[1]
-            data["perf_network"].append({"to_worker_id": k, "latency": avg_latency})
+            perf_data["perf_network"].append({"to_worker_id": k, "latency": avg_latency})
 
+        data = {"info_update": json.dumps(perf_data)}
+        if torch.cuda.is_available():
+            memory = torch.cuda.mem_get_info()
+            data["gpu_remaining_memory"] = memory[0]
         r = requests.post(f"{self.controller_url}/worker_heartbeat",
-                          json={"info_update": json.dumps(data)},
+                          json=data,
                           headers={"worker-id": self.worker_id, "api-token": self.api_token})
         res = json.loads(r.content)
         self.tm_pubkeys = res["pubkeys"]
