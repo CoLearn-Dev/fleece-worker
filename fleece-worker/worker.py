@@ -432,6 +432,9 @@ class Worker:
                         h = self.layers[full_layer_name](h)
                     elif layer_name.startswith("layers."):
                         if is_new_task:
+                            gpu_mem_info = torch.cuda.mem_get_info()
+                            if gpu_mem_info[0]/gpu_mem_info[1] < 0.1:
+                                return
                             kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
                         else:
                             kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
