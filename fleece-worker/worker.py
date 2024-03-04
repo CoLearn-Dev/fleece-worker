@@ -304,6 +304,23 @@ class Worker:
         except:
             return False
 
+    def send_forward(self, to_worker_id, data):
+        if to_worker_id == self.worker_id:
+            # self.forward(**data)
+            send_request(
+                f"http://127.0.0.1:{self.port}/forward",
+                json=data,
+                exec=executor_forward,
+                worker=self,
+                to_worker_id=to_worker_id)
+        else:
+            send_request(
+                f"{self.get_worker_url(to_worker_id)}/forward",
+                json=data,
+                exec=executor_forward,
+                worker=self,
+                to_worker_id=to_worker_id)
+
     def forward(self,
                 task_id: str,
                 plan: List[Tuple[str, List[str]]],
@@ -325,17 +342,16 @@ class Worker:
             self.del_task(task_id)
             if index < len(plan)-1:
                 # next node
-                send_request(
-                    f"{self.get_worker_url(plan[index+1][0])}/forward",
-                    json={
+                self.send_forward(
+                    plan[index+1][0],
+                    data={
                         "task_id": task_id,
                         "plan": plan,
                         "step": step+1,
                         "task_manager_url": task_manager_url,
                         "signature": signature,
                         "timestamp": timestamp,
-                    },
-                    exec=executor_forward)
+                    })
             return
 
         if is_new_task:
@@ -451,9 +467,9 @@ class Worker:
             self.task_eos_reached[task_id] |= next_token == 2  # eos_id
             if not all(self.task_eos_reached[task_id]):
                 # next node
-                send_request(
-                    f"{self.get_worker_url(plan[0][0])}/forward",
-                    json={
+                self.send_forward(
+                    plan[0][0],
+                    data={
                         "task_id": task_id,
                         "plan": plan,
                         "step": 0,
@@ -465,23 +481,19 @@ class Worker:
                         "task_manager_url": task_manager_url,
                         "signature": signature,
                         "timestamp": timestamp,
-                    },
-                    exec=executor_forward,
-                    worker=self,
-                    to_worker_id=plan[0][0])
+                    })
             else:
                 self.cancel_task(task_id)
-                send_request(
-                    f"{self.get_worker_url(plan[0][0])}/forward",
-                    json={
+                self.send_forward(
+                    plan[0][0],
+                    data={
                         "task_id": task_id,
                         "plan": plan,
                         "step": 0,
                         "task_manager_url": task_manager_url,
                         "signature": signature,
                         "timestamp": timestamp,
-                    },
-                    exec=executor_forward)
+                    })
             # update
             if task_manager_url is not None:
                 send_request(
@@ -496,9 +508,9 @@ class Worker:
                     worker=self)
         else:
             # next node
-            send_request(
-                f"{self.get_worker_url(plan[index+1][0])}/forward",
-                json={
+            self.send_forward(
+                plan[index+1][0],
+                data={
                     "task_id": task_id,
                     "plan": plan,
                     "step": step+1,
@@ -510,10 +522,7 @@ class Worker:
                     "task_manager_url": task_manager_url,
                     "signature": signature,
                     "timestamp": timestamp,
-                },
-                exec=executor_forward,
-                worker=self,
-                to_worker_id=plan[index+1][0])
+                })
             # update
             if task_manager_url is not None:
                 send_request(

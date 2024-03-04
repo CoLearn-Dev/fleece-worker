@@ -97,6 +97,7 @@ if __name__ == '__main__':
     parser.add_argument("-c", "--controller-url")
     parser.add_argument("-w", "--worker-url")
     parser.add_argument("-t", "--api-token")
+    parser.add_argument("--port")
     parser.add_argument("--worker-nickname")
     parser.add_argument("--heartbeat-interval")
     args = parser.parse_args()
@@ -110,6 +111,9 @@ if __name__ == '__main__':
     else:
         worker.worker_url = "http://127.0.0.1:8080"
         port = 8080
+    if args.port is not None:
+        port = int(args.port)
+    worker.port = port
     if args.api_token is not None:
         worker.api_token = args.api_token
     if args.worker_nickname is not None:
