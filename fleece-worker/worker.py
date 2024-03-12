@@ -15,16 +15,20 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 
 torch.set_default_device("cpu")
-torch.set_default_dtype(torch.float16)
 
 llama_2_7b_args = {"dim": 4096, "multiple_of": 256, "n_heads": 32, "n_layers": 32, "norm_eps": 1e-06, "vocab_size": 32000}
 llama_2_13b_args = {"dim": 5120, "multiple_of": 256, "n_heads": 40, "n_layers": 40, "norm_eps": 1e-05, "vocab_size": 32000}
 llama_2_70b_args = {"dim": 8192, "multiple_of": 4096, "ffn_dim_multiplier": 1.3, "n_heads": 64, "n_kv_heads": 8, "n_layers": 80, "norm_eps": 1e-05, "vocab_size": 32000}
 
 if torch.cuda.is_available():
-    global_freqs_cis = precompute_freqs_cis(128, 4096).to("cuda")
+    main_device = "cuda"
+    main_dtype = torch.float16
+    torch.set_default_dtype(torch.float16)
 else:
-    global_freqs_cis = precompute_freqs_cis(128, 4096)
+    main_device = "cpu"
+    main_dtype = torch.float32
+    torch.set_default_dtype(torch.float32)
+global_freqs_cis = precompute_freqs_cis(128, 4096).to(main_device)
 # tokenizer = Tokenizer(model_path="/home/ubuntu/llama/tokenizer.model")
 # print(tokenizer.bos_id) 1
 # print(tokenizer.eos_id) 2
@@ -57,7 +61,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
                 model.attention.n_local_kv_heads,
                 model.attention.head_dim,
             ),
-            device="cuda"
+            device=main_device
         )
         cache_v = torch.zeros(
             (
@@ -66,7 +70,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
                 model.attention.n_local_kv_heads,
                 model.attention.head_dim,
             ),
-            device="cuda"
+            device=main_device
         )
         return (cache_k, cache_v)
     old_cache_k, old_cache_v = kv_cache
@@ -79,7 +83,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
                 model.attention.n_local_kv_heads,
                 model.attention.head_dim,
             ),
-            device="cuda"
+            device=main_device
         )
         cache_v = torch.zeros(
             (
@@ -88,7 +92,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
                 model.attention.n_local_kv_heads,
                 model.attention.head_dim,
             ),
-            device="cuda"
+            device=main_device
         )
         cache_k[:, :start_pos, :, :], cache_v[:, :start_pos, :, :] = old_cache_k[:, :start_pos, :, :], old_cache_v[:, :start_pos, :, :]
         del_tensor(old_cache_k)
@@ -241,7 +245,7 @@ class Worker:
                 else:
                     raise NotImplementedError("Unknown layers")
                 l.load_state_dict(torch.load(path, map_location="cpu"))
-                l.to("cuda")
+                l.to(main_device)
                 self.layers[full_layer_name] = l
 
     def unload_layers(self, layer_names: List[str]):
@@ -374,10 +378,7 @@ class Worker:
                 tokens = torch.zeros((bsz, min_prompt_len), dtype=torch.long)
                 for k, t in enumerate(payload):
                     tokens[k, :] = torch.tensor(t[:min_prompt_len], dtype=torch.long)
-                if torch.cuda.is_available():
-                    h = tokens.to("cuda")
-                else:
-                    h = tokens
+                h = tokens.to(main_device)
             else:
                 prompt_tokens = self.task_prompt_tokens[task_id]
                 tokens = torch.zeros((bsz, 1), dtype=torch.long)
@@ -386,17 +387,11 @@ class Worker:
                         tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long)
                     else:
                         tokens[k, :] = torch.tensor([payload[k]], dtype=torch.long)
-                if torch.cuda.is_available():
-                    h = tokens.to("cuda")
-                else:
-                    h = tokens
+                h = tokens.to(main_device)
             # print(h)
             bsz, seqlen = h.shape
         else:
-            if torch.cuda.is_available():
-                h = torch.tensor(payload, dtype=torch.float16, device="cuda")
-            else:
-                h = torch.tensor(payload, dtype=torch.float16)
+            h = torch.tensor(payload, dtype=main_dtype, device=main_device)
             if len(h.shape) > 2:
                 bsz, seqlen, _ = h.shape
             else:
@@ -421,10 +416,10 @@ class Worker:
                     model_name, layer_name = parse_layer_name(full_layer_name)
                     if model_name.startswith("dummy"):
                         if layer_name == "output":
-                            h = torch.zeros((bsz, 1, 32000), dtype=torch.float16)
+                            h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
                             h[:, :, round+10] = 1.0
                             if round >= 320:
-                                h = torch.zeros((bsz, 1, 32000), dtype=torch.float16)
+                                h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
                                 h[:, :, 2] = 1.0
                             # time.sleep(0.01)
                         continue
@@ -432,9 +427,10 @@ class Worker:
                         h = self.layers[full_layer_name](h)
                     elif layer_name.startswith("layers."):
                         if is_new_task:
-                            gpu_mem_info = torch.cuda.mem_get_info()
-                            if gpu_mem_info[0]/gpu_mem_info[1] < 0.1:
-                                return
+                            if torch.cuda.is_available():
+                                gpu_mem_info = torch.cuda.mem_get_info()
+                                if gpu_mem_info[0]/gpu_mem_info[1] < 0.1:
+                                    return
                             kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
                         else:
                             kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
