@@ -325,6 +325,56 @@ class Worker:
                 worker=self,
                 to_worker_id=to_worker_id)
 
+    def layers_forward(self, h, layer_names, bsz, is_new_task, start_pos, seqlen, kv_cache_dict):
+        freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
+        mask = None
+        if seqlen > 1:
+            mask = torch.full(
+                (1, 1, seqlen, seqlen), float("-inf"), device=h.device
+            )
+            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
+        with torch.inference_mode():
+            with self.mutex:
+                input_shape = h.shape
+                st = time.monotonic()
+                for full_layer_name in layer_names:
+                    model_name, layer_name = parse_layer_name(full_layer_name)
+                    if model_name.startswith("dummy"):
+                        if layer_name == "output":
+                            h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
+                            h[:, :, round+10] = 1.0
+                            if round >= 320:
+                                h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
+                                h[:, :, 2] = 1.0
+                            # time.sleep(0.01)
+                        continue
+                    if layer_name == "tok_embeddings":
+                        h = self.layers[full_layer_name](h)
+                    elif layer_name.startswith("layers."):
+                        if is_new_task:
+                            if torch.cuda.is_available():
+                                gpu_mem_info = torch.cuda.mem_get_info()
+                                if gpu_mem_info[0]/gpu_mem_info[1] < 0.05 and gpu_mem_info[0] < 2e9:
+                                    return None, None
+                            kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
+                        else:
+                            kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
+                        h = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache)
+                        kv_cache_dict[full_layer_name] = kv_cache
+                    elif layer_name == "norm":
+                        h = self.layers[full_layer_name](h)
+                    elif layer_name == "output":
+                        h = self.layers[full_layer_name](h)
+                    else:
+                        raise NotImplementedError("Unknown layers")
+                en = time.monotonic()
+                latency = (en-st)*1000
+                self.perf_computation.append(((str(layer_names), str(list(input_shape))), latency))
+        return h, kv_cache_dict
+
+    def forward_same_node(self, task_id: str):
+        pass
+
     def forward(self,
                 task_id: str,
                 plan: List[Tuple[str, List[str]]],
@@ -398,54 +448,13 @@ class Worker:
                 bsz, seqlen = h.shape
 
         # forward
-        freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
-        mask = None
-        if seqlen > 1:
-            mask = torch.full(
-                (1, 1, seqlen, seqlen), float("-inf"), device=h.device
-            )
-            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
-        # layer
         _, layer_names = plan[index]
         self.preload_layers(layer_names)  # preload
-        with torch.inference_mode():
-            with self.mutex:
-                input_shape = h.shape
-                st = time.monotonic()
-                for full_layer_name in layer_names:
-                    model_name, layer_name = parse_layer_name(full_layer_name)
-                    if model_name.startswith("dummy"):
-                        if layer_name == "output":
-                            h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
-                            h[:, :, round+10] = 1.0
-                            if round >= 320:
-                                h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
-                                h[:, :, 2] = 1.0
-                            # time.sleep(0.01)
-                        continue
-                    if layer_name == "tok_embeddings":
-                        h = self.layers[full_layer_name](h)
-                    elif layer_name.startswith("layers."):
-                        if is_new_task:
-                            if torch.cuda.is_available():
-                                gpu_mem_info = torch.cuda.mem_get_info()
-                                if gpu_mem_info[0]/gpu_mem_info[1] < 0.1:
-                                    return
-                            kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
-                        else:
-                            kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
-                        h = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache)
-                        kv_cache_dict[full_layer_name] = kv_cache
-                    elif layer_name == "norm":
-                        h = self.layers[full_layer_name](h)
-                    elif layer_name == "output":
-                        h = self.layers[full_layer_name](h)
-                    else:
-                        raise NotImplementedError("Unknown layers")
-                en = time.monotonic()
-                latency = (en-st)*1000
-                self.perf_computation.append(((str(layer_names), str(list(input_shape))), latency))
-        self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
+        h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, start_pos, seqlen, kv_cache_dict)
+        if h is None:
+            return
+        else:
+            self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
 
         # last node
         if index == len(plan)-1:

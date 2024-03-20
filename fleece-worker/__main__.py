@@ -46,7 +46,7 @@ class ForwardRequest(BaseModel):
     step: int
     round: int = -1
     payload: Optional[List] = None
-    max_total_len: int = 1024
+    max_total_len: int = 2048
     temperature: float = 0.0
     top_p: float = 0.9
     task_manager_url: Optional[str] = None
