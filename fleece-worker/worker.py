@@ -399,7 +399,7 @@ class Worker:
             next_token = next_token.reshape(-1)
             if start_pos > max_total_len:
                 next_token = torch.tensor([2] * bsz, device=main_device)  # FIXME fake max length limit
-            print(next_token)
+            # print(next_token)
             next_token = next_token
             # eos_reached
             if is_new_task:
@@ -502,7 +502,7 @@ class Worker:
         _, layer_names = plan[index]
         self.preload_layers(layer_names)  # preload
         if len(plan) == 1:
-            delta_round = 8
+            delta_round = 16
             eos_reached = None if is_new_task else self.task_eos_reached[task_id].to(main_device)
             prompt_tokens = self.task_prompt_tokens[task_id]
             with self.same_node_mutex:
