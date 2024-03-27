@@ -110,7 +110,7 @@ def del_tensor(t):
     t.untyped_storage().resize_(0)
 
 
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=400)
 executor_forward = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 
 
@@ -452,6 +452,7 @@ class Worker:
                     else:
                         tokens[k, :] = next_token[k]
                 h = tokens
+            return h, kv_cache_dict, ans_tokens, eos_reached
         finally:
             # update_task
             for i, output_tokens in enumerate(ans_tokens):
@@ -529,6 +530,7 @@ class Worker:
             else:
                 bsz, seqlen = h.shape
 
+        # last node init
         if index == len(plan)-1 and is_new_task:
             self.task_eos_reached[task_id] = torch.tensor([False] * bsz)
             self.task_update_queue[task_id] = queue.Queue()
