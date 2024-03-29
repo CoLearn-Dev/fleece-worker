@@ -339,7 +339,7 @@ class Worker:
                 reply = await connection.send("forward", data)
                 if reply.status_code != 200: 
                     self.cancel_task(data["task_id"])
-            from_thread.run(send)
+            from_thread.run_sync(self.peer.tg.start_soon, send)
         
 
     def layers_forward(self, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict):
