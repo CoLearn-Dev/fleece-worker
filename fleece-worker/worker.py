@@ -1,9 +1,9 @@
-from typing import List, Tuple, Dict, Any, Set
+from typing import List, Optional, Tuple, Dict, Any, Set
 import os
 import torch
 from torch import nn
 from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
-# from .tokenizer import Tokenizer
+from peerrtc.peer import Peer
 import requests
 import threading
 import concurrent.futures
@@ -14,6 +14,7 @@ import json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 import queue
+from anyio import from_thread
 
 torch.set_default_device("cpu")
 
@@ -124,7 +125,7 @@ def requests_post(url, headers=None, json=None, worker=None, to_worker_id=None):
             en = time.monotonic()
             latency = (en-st)*1000
             worker.perf_network.append((to_worker_id, latency))
-    except:
+    except Exception:
         if worker is not None:
             worker.cancel_task(json["task_id"])
 
@@ -190,6 +191,7 @@ class Worker:
         self.worker_urls = {}
         self.perf_computation = []
         self.perf_network = []
+        self.peer: Optional[Peer] = None
 
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
@@ -291,7 +293,7 @@ class Worker:
     def get_worker_url(self, worker_id):
         if worker_id not in self.worker_urls:
             self.pull_worker_url()
-        return self.worker_urls[worker_id]
+        return self.worker_urls.get(worker_id)
 
     def verify(self, tm_url, task_id, plan, timestamp, signature_hex):
         public_key_bytes = bytes.fromhex(self.tm_pubkeys[tm_url])
@@ -314,21 +316,31 @@ class Worker:
             return False
 
     def send_forward(self, to_worker_id, data):
-        if to_worker_id == self.worker_id:
-            # self.forward(**data)
-            send_request(
-                f"http://127.0.0.1:{self.port}/forward",
-                json=data,
-                exec=executor_forward,
-                worker=self,
-                to_worker_id=to_worker_id)
-        else:
-            send_request(
-                f"{self.get_worker_url(to_worker_id)}/forward",
-                json=data,
-                exec=executor_forward,
-                worker=self,
-                to_worker_id=to_worker_id)
+        url = self.get_worker_url(to_worker_id) 
+        if (url is not None or url == "none") and to_worker_id != self.worker_id:
+            if to_worker_id == self.worker_id:
+                # self.forward(**data)
+                send_request(
+                    f"http://127.0.0.1:{self.port}/forward",
+                    json=data,
+                    exec=executor_forward,
+                    worker=self,
+                    to_worker_id=to_worker_id)
+            else:
+                send_request(
+                    f"{self.get_worker_url(to_worker_id)}/forward",
+                    json=data,
+                    exec=executor_forward,
+                    worker=self,
+                    to_worker_id=to_worker_id)
+        else: 
+            async def send():
+                connection = await self.peer.connect(to_worker_id)
+                reply = await connection.send("forward", data)
+                if reply.status_code != 200: 
+                    self.cancel_task(data["task_id"])
+            from_thread.run_sync(self.peer.tg.start_soon, send)
+        
 
     def layers_forward(self, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict):
         freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]

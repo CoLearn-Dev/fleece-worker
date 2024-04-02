@@ -17,6 +17,7 @@ setup(
         "uvicorn",
         "requests",
         "cryptography",
+        "fleece-network"
     ],
     python_requires=">=3.10",
 )

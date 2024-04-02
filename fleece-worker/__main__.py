@@ -1,6 +1,9 @@
-from typing import List, Tuple, Optional
+import traceback
+from typing import Any, List, Tuple, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from peerrtc.peer import Peer
 from pydantic import BaseModel
+import anyio
 import uvicorn
 from .worker import Worker
 import argparse
@@ -16,10 +19,7 @@ class LayersRequest(BaseModel):
     layer_names: List[str]
 
 
-@app.post("/preload_layers")
-def preload_layers(
-    req: LayersRequest
-):
+def preload_layers(req: LayersRequest): 
     try:
         worker.preload_layers(req.layer_names)
         return None
@@ -28,10 +28,7 @@ def preload_layers(
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
-@app.post("/unload_layers")
-def unload_layers(
-    req: LayersRequest
-):
+def unload_layers(req: LayersRequest):
     try:
         worker.unload_layers(req.layer_names)
         return None
@@ -54,14 +51,21 @@ class ForwardRequest(BaseModel):
     timestamp: Optional[int] = None
 
 
-@app.post("/forward")
-def forward(
-    req: ForwardRequest,
-    background_tasks: BackgroundTasks
-):
+def forward(req: ForwardRequest):
     try:
-        background_tasks.add_task(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p,
-                                  req.task_manager_url, req.signature, req.timestamp)
+        worker.forward(
+            req.task_id,
+            req.plan,
+            req.step,
+            req.round,
+            req.payload,
+            req.max_total_len,
+            req.temperature,
+            req.top_p,
+            req.task_manager_url,
+            req.signature,
+            req.timestamp,
+        )
         return None
     except Exception as e:
         print(e)
@@ -79,20 +83,22 @@ class GetInfoResponse(BaseModel):
     latency_list: List[Optional[float]] = []
 
 
-@app.post("/get_info")
-def get_info(
-    req: GetInfoRequest,
-    response_model=GetInfoResponse
-):
+def get_info(req: GetInfoRequest) -> GetInfoResponse:
     try:
-        worker_nickname, gpu_mem_info, latency_list = worker.get_info(req.node_list, req.timeout)
-        return GetInfoResponse(worker_nickname=worker_nickname, gpu_mem_info=gpu_mem_info, latency_list=latency_list)
+        worker_nickname, gpu_mem_info, latency_list = worker.get_info(
+            req.node_list, req.timeout
+        )
+        return GetInfoResponse(
+            worker_nickname=worker_nickname,
+            gpu_mem_info=gpu_mem_info,
+            latency_list=latency_list,
+        )
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
-if __name__ == '__main__':
+async def main() -> None: 
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--controller-url")
     parser.add_argument("-w", "--worker-url")
@@ -102,14 +108,14 @@ if __name__ == '__main__':
     parser.add_argument("--heartbeat-interval")
     args = parser.parse_args()
     if args.worker_url is not None:
-        worker.worker_url = args.worker_url
-        parsed = worker.worker_url.split(':')
+        worker_url = args.worker_url
+        parsed = worker_url.split(':')
         if len(parsed) >= 3:
             port = int(parsed[2])
         else:
             port = 8080
     else:
-        worker.worker_url = "http://127.0.0.1:8080"
+        worker_url = "none"
         port = 8080
     if args.port is not None:
         port = int(args.port)
@@ -122,9 +128,7 @@ if __name__ == '__main__':
         worker.heartbeat_interval = int(args.heartbeat_interval)
     if args.controller_url is not None:
         worker.controller_url = args.controller_url
-        data = {
-            "url": worker.worker_url,
-        }
+        data = { "url": worker_url }
         if worker.worker_nickname is not None:
             data["nickname"] = worker.worker_nickname
         if torch.cuda.is_available():
@@ -144,10 +148,41 @@ if __name__ == '__main__':
         worker.worker_id = res["id"]
         worker.pull_worker_url()
         worker.start_heartbeat_daemon()
-    uvicorn.run(app, host="0.0.0.0", port=port, access_log=True)
-    # if args.controller_url is not None:
-    #     r = requests.post(f"{args.controller_url}/deregister_worker",
-    #                       json={
-    #                           "url": worker.worker_url,
-    #                       },
-    #                       headers={"api-token": worker.api_token})
+
+        r = requests.get(
+            f"{args.controller_url}/get_network_servers",
+            headers={"api-token": worker.api_token}
+        )
+
+        servers = json.loads(r.content)
+        signaling = servers["signaling"]["url"]
+        turns = servers["turn"]
+        async with anyio.create_task_group() as tg: 
+            worker.peer = Peer(
+                worker.worker_id, 
+                signaling, 
+                [(turn["url"], turn["username"], turn["password"]) for turn in turns], 
+                {
+                    "preload_layers": preload_layers,
+                    "unload_layers": unload_layers,
+                    "forward": forward,
+                    "get_info": get_info,
+                },
+                tg,
+            )
+            
+            # start the FastAPI server when public IP is available
+            if worker_url != "none":
+                app.add_api_route("/preload_layers", preload_layers, methods=["POST"])
+                app.add_api_route("/unload_layers", unload_layers, methods=["POST"])
+                app.add_api_route("/forward", forward, methods=["POST"])
+                app.add_api_route("/get_info", get_info, methods=["POST"])
+                
+                uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=True)
+                uviserver = uvicorn.Server(uviconfig)
+                tg.start_soon(uviserver.serve)
+                
+
+
+if __name__ == '__main__':
+    anyio.run(main)
