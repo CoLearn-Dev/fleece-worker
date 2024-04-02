@@ -17,7 +17,7 @@ setup(
         "uvicorn",
         "requests",
         "cryptography",
-        "fleece-network @ git+ssh://git@github.com/CoLearn-Dev/fleece-network.git"
+        "fleece-network"
     ],
     python_requires=">=3.10",
 )
