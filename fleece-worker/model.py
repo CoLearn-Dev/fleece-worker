@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 import torch.nn.functional as F
@@ -241,10 +241,10 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        x_list: List[torch.Tensor],
+        start_pos_list: List[int],
+        global_freqs_cis: torch.Tensor,
+        kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
     ):
         """
         Forward pass of the attention module.
@@ -259,38 +259,55 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-        bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        xq_, xk_, xv_ = self.wq(x), self.wk(x), self.wv(x)
 
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        start = 0
+        output_list = []
+        for i, x in enumerate(x_list):
+            bsz, seqlen, _ = x.shape
+            xq = xq_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            start += (bsz * seqlen)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+            start_pos = start_pos_list[i]
+            kv_cache = kv_cache_list[i]
+            freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
+            mask = None
+            if seqlen > 1:
+                mask = torch.full(
+                    (1, 1, seqlen, seqlen), float("-inf"), device=x.device
+                )
+                mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
 
-        # self.cache_k = self.cache_k.to(xq)
-        # self.cache_v = self.cache_v.to(xq)
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        cache_k, cache_v = kv_cache
-        cache_k[:bsz, start_pos: start_pos + seqlen] = xk
-        cache_v[:bsz, start_pos: start_pos + seqlen] = xv
+            # self.cache_k = self.cache_k.to(xq)
+            # self.cache_v = self.cache_v.to(xq)
 
-        keys = cache_k[:bsz, : start_pos + seqlen]
-        values = cache_v[:bsz, : start_pos + seqlen]
+            cache_k, cache_v = kv_cache
+            cache_k[:bsz, start_pos: start_pos + seqlen] = xk
+            cache_v[:bsz, start_pos: start_pos + seqlen] = xv
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            keys = cache_k[:bsz, : start_pos + seqlen]
+            values = cache_v[:bsz, : start_pos + seqlen]
 
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        keys = keys.transpose(1, 2)
-        values = values.transpose(1, 2)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            # repeat k/v heads if n_kv_heads < n_heads
+            keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            keys = keys.transpose(1, 2)
+            values = values.transpose(1, 2)
+            scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if mask is not None:
+                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            output_list.append(output)
+        _, _, sz = output_list[0].shape
+        output = torch.cat([x.view(-1, sz) for x in output_list])
         return self.wo(output)
 
 
@@ -377,11 +394,10 @@ class TransformerBlock(nn.Module):
     @torch.inference_mode()
     def forward(
         self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        x_list: List[torch.Tensor],
+        start_pos_list: List[int],
+        global_freqs_cis: torch.Tensor,
+        kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -396,11 +412,19 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
+        _, _, sz = x_list[0].shape
+        x = torch.cat([x.view(-1, sz) for x in x_list])
         h = x + self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_cis, mask, kv_cache
+            self.attention_norm(x), x_list, start_pos_list, global_freqs_cis, kv_cache_list
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out
+        out_list = []
+        start = 0
+        for x in x_list:
+            bsz, seqlen, sz = x.shape
+            out_list.append(out[start:start+(bsz * seqlen)].view(bsz, seqlen, sz))
+            start += (bsz * seqlen)
+        return out_list
 
 
 # class Transformer(nn.Module):

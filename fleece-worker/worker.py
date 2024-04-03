@@ -368,51 +368,70 @@ class Worker:
 
     def layer_forward_engine_step(self, task_list: List[LayerForward]):
         task = task_list[0]
-        h = task.h
-        freqs_cis = global_freqs_cis[task.start_pos: task.start_pos + task.seqlen]
-        mask = None
-        if task.seqlen > 1:
-            mask = torch.full(
-                (1, 1, task.seqlen, task.seqlen), float("-inf"), device=h.device
-            )
-            mask = torch.triu(mask, diagonal=task.start_pos + 1).type_as(h)
         with torch.inference_mode():
-            input_shape = h.shape
+            input_shapes = [list(t.h.shape) for t in task_list]
             st = time.monotonic()
             for full_layer_name in task.layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
-                if model_name.startswith("dummy"):
-                    if layer_name == "output":
-                        h = torch.zeros((task.bsz, 1, 32000), dtype=main_dtype)
-                        h[:, :, task.round+10] = 1.0
-                        if task.round >= 320:
-                            h = torch.zeros((task.bsz, 1, 32000), dtype=main_dtype)
-                            h[:, :, 2] = 1.0
-                        # time.sleep(0.01)
-                    continue
+                # if model_name.startswith("dummy"):
+                #     if layer_name == "output":
+                #         h = torch.zeros((task.bsz, 1, 32000), dtype=main_dtype)
+                #         h[:, :, task.round+10] = 1.0
+                #         if task.round >= 320:
+                #             h = torch.zeros((task.bsz, 1, 32000), dtype=main_dtype)
+                #             h[:, :, 2] = 1.0
+                #         # time.sleep(0.01)
+                #     continue
                 if layer_name == "tok_embeddings":
+                    h = torch.cat([t.h.view(-1) for t in task_list])
                     h = self.layers[full_layer_name](h)
+                    sz = h.shape[-1]
+                    start = 0
+                    for t in task_list:
+                        bsz, seqlen = t.h.shape
+                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
+                        start += (bsz * seqlen)
                 elif layer_name.startswith("layers."):
-                    if task.is_new_task:
-                        if torch.cuda.is_available():
-                            gpu_mem_info = torch.cuda.mem_get_info()
-                            if gpu_mem_info[0]/gpu_mem_info[1] < 0.05 and gpu_mem_info[0] < 2e9:
-                                return None, None
-                        kv_cache = get_kv_cache(h, task.start_pos, None, self.layers[full_layer_name])
-                    else:
-                        kv_cache = get_kv_cache(h, task.start_pos, task.kv_cache_dict[full_layer_name], self.layers[full_layer_name])
-                    h = self.layers[full_layer_name](h, task.start_pos, freqs_cis, mask, kv_cache)
-                    task.kv_cache_dict[full_layer_name] = kv_cache
+                    kv_cache_list = []
+                    for t in task_list:
+                        if t.is_new_task:
+                            if torch.cuda.is_available():
+                                gpu_mem_info = torch.cuda.mem_get_info()
+                                if gpu_mem_info[0]/gpu_mem_info[1] < 0.05 and gpu_mem_info[0] < 2e9:
+                                    return None, None  # TODO need fix
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name]))
+                        else:
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
+                    h_list = self.layers[full_layer_name]([t.h for t in task_list], [t.start_pos for t in task_list], global_freqs_cis, kv_cache_list)
+                    for i, t in enumerate(task_list):
+                        t.h = h_list[i]
+                        t.kv_cache_dict[full_layer_name] = kv_cache_list[i]
                 elif layer_name == "norm":
+                    _, _, sz = task_list[0].h.shape
+                    h = torch.cat([t.h.view(-1, sz) for t in task_list])
                     h = self.layers[full_layer_name](h)
+                    start = 0
+                    for t in task_list:
+                        bsz, seqlen, sz = t.h.shape
+                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
+                        start += (bsz * seqlen)
                 elif layer_name == "output":
+                    _, _, sz = task_list[0].h.shape
+                    h = torch.cat([t.h.view(-1, sz) for t in task_list])
                     h = self.layers[full_layer_name](h)
+                    sz = h.shape[-1]
+                    start = 0
+                    for t in task_list:
+                        bsz, seqlen, _ = t.h.shape
+                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
+                        start += (bsz * seqlen)
                 else:
                     raise NotImplementedError("Unknown layers")
             en = time.monotonic()
             latency = (en-st)*1000
-            self.perf_computation.append(((str(task.layer_names), str(list(input_shape))), latency))
-        task.call_back_queue.put((h, task.kv_cache_dict))
+            self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
+        for task in task_list:
+            task.call_back_queue.put((task.h, task.kv_cache_dict))
 
     def layer_forward_engine(self):
         q = self.layer_forward_engine_queue
@@ -421,20 +440,21 @@ class Worker:
             task = q.get()
             total_bsz = task.bsz
             task_list.append(task)
-            # while True:
-            #     try:
-            #         task2 = q.get(block=False)
-            #         if task2.layer_names == task.layer_names:
-            #             task_list.append(task2)
-            #             total_bsz += task2.bsz
-            #             if total_bsz > 8:
-            #                 break
-            #         else:
-            #             q.put(task2)
-            #             break
-            #     except queue.Empty:
-            #         break
-            # print("layer_forward_engine_step", task_list)
+            while True:
+                try:
+                    task2 = q.get(block=False)
+                    if task2.layer_names == task.layer_names:
+                        task_list.append(task2)
+                        total_bsz += task2.bsz
+                        if total_bsz > 8:
+                            break
+                    else:
+                        q.put(task2)
+                        break
+                except queue.Empty:
+                    break
+            # if len(task_list) > 1:
+            #     print("layer_forward_engine_step: ", len(task_list))
             self.layer_forward_engine_step(task_list)
 
     def start_layer_forward_engine(self):

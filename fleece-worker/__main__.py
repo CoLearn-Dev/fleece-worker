@@ -10,6 +10,7 @@ import argparse
 import requests
 import json
 import torch
+import concurrent.futures
 
 app = FastAPI()
 worker = Worker()
@@ -51,21 +52,13 @@ class ForwardRequest(BaseModel):
     timestamp: Optional[int] = None
 
 
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+
+
 def forward(req: ForwardRequest):
     try:
-        worker.forward(
-            req.task_id,
-            req.plan,
-            req.step,
-            req.round,
-            req.payload,
-            req.max_total_len,
-            req.temperature,
-            req.top_p,
-            req.task_manager_url,
-            req.signature,
-            req.timestamp,
-        )
+        executor.submit(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p,
+                        req.task_manager_url, req.signature, req.timestamp)
         return None
     except Exception as e:
         print(e)
@@ -179,7 +172,7 @@ async def main() -> None:
                 app.add_api_route("/forward", forward, methods=["POST"])
                 app.add_api_route("/get_info", get_info, methods=["POST"])
 
-                uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=True)
+                uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=False)
                 uviserver = uvicorn.Server(uviconfig)
                 tg.start_soon(uviserver.serve)
 
