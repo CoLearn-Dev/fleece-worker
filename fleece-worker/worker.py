@@ -14,7 +14,6 @@ import json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 import queue
-from anyio import from_thread
 
 torch.set_default_device("cpu")
 
@@ -174,6 +173,30 @@ def measure_latency(node_list: List[str], timeout):
     return ans
 
 
+class LayerForward:
+    def __init__(
+        self,
+        h: torch.Tensor,
+        layer_names: List,
+        bsz: int,
+        is_new_task: bool,
+        round: int,
+        start_pos: int,
+        seqlen: int,
+        kv_cache_dict: Dict,
+        call_back_queue: queue.Queue,
+    ):
+        self.h = h
+        self.layer_names = layer_names
+        self.bsz = bsz
+        self.is_new_task = is_new_task
+        self.round = round
+        self.start_pos = start_pos
+        self.seqlen = seqlen
+        self.kv_cache_dict = kv_cache_dict
+        self.call_back_queue = call_back_queue
+
+
 class Worker:
     def __init__(
             self,
@@ -192,16 +215,17 @@ class Worker:
         self.perf_computation = []
         self.perf_network = []
         self.peer: Optional[Peer] = None
+        self.async_portal = None
 
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
         self.mutex = threading.Lock()
-        self.same_node_mutex = threading.Lock()
         self.task_prompt_tokens: Dict[str, torch.Tensor] = dict()
         self.task_eos_reached: Dict[str, torch.Tensor] = dict()
         self.task_local_steps: Dict[str, List[int]] = dict()
         self.task_update_queue: Dict[str, queue.Queue[Tuple[int, List[int]]]] = dict()
+        self.layer_forward_engine_queue: queue.Queue[LayerForward] = queue.Queue()
         self.canceled_task: Set[str] = set()
 
     def fetch_layer(self, full_layer_name):
@@ -316,8 +340,8 @@ class Worker:
             return False
 
     def send_forward(self, to_worker_id, data):
-        url = self.get_worker_url(to_worker_id) 
-        if (url is not None or url == "none") and to_worker_id != self.worker_id:
+        url = self.get_worker_url(to_worker_id)
+        if (url is not None and url != "none") and to_worker_id != self.worker_id:
             if to_worker_id == self.worker_id:
                 # self.forward(**data)
                 send_request(
@@ -333,60 +357,115 @@ class Worker:
                     exec=executor_forward,
                     worker=self,
                     to_worker_id=to_worker_id)
-        else: 
+        else:
             async def send():
                 connection = await self.peer.connect(to_worker_id)
                 reply = await connection.send("forward", data)
-                if reply.status_code != 200: 
+                if reply.status_code != 200:
                     self.cancel_task(data["task_id"])
-            from_thread.run_sync(self.peer.tg.start_soon, send)
-        
+            self.async_portal.call(self.peer.tg.start_soon, send)
 
-    def layers_forward(self, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict):
-        freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
-        mask = None
-        if seqlen > 1:
-            mask = torch.full(
-                (1, 1, seqlen, seqlen), float("-inf"), device=h.device
-            )
-            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
+    def layer_forward_engine_step(self, task_list: List[LayerForward]):
+        task = task_list[0]
         with torch.inference_mode():
-            with self.mutex:
-                input_shape = h.shape
-                st = time.monotonic()
-                for full_layer_name in layer_names:
-                    model_name, layer_name = parse_layer_name(full_layer_name)
-                    if model_name.startswith("dummy"):
+            input_shapes = [list(t.h.shape) for t in task_list]
+            st = time.monotonic()
+            for full_layer_name in task.layer_names:
+                model_name, layer_name = parse_layer_name(full_layer_name)
+                if model_name.startswith("dummy"):
+                    for t in task_list:
                         if layer_name == "output":
-                            h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
-                            h[:, :, round+10] = 1.0
-                            if round >= 320:
-                                h = torch.zeros((bsz, 1, 32000), dtype=main_dtype)
-                                h[:, :, 2] = 1.0
+                            t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
+                            t.h[:, :, t.round+10] = 1.0
+                            if t.round >= 320:
+                                t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
+                                t.h[:, :, 2] = 1.0
                             # time.sleep(0.01)
-                        continue
-                    if layer_name == "tok_embeddings":
-                        h = self.layers[full_layer_name](h)
-                    elif layer_name.startswith("layers."):
-                        if is_new_task:
+                    continue
+                if layer_name == "tok_embeddings":
+                    h = torch.cat([t.h.view(-1) for t in task_list])
+                    h = self.layers[full_layer_name](h)
+                    sz = h.shape[-1]
+                    start = 0
+                    for t in task_list:
+                        bsz, seqlen = t.h.shape
+                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
+                        start += (bsz * seqlen)
+                elif layer_name.startswith("layers."):
+                    kv_cache_list = []
+                    for t in task_list:
+                        if t.is_new_task:
                             if torch.cuda.is_available():
                                 gpu_mem_info = torch.cuda.mem_get_info()
                                 if gpu_mem_info[0]/gpu_mem_info[1] < 0.05 and gpu_mem_info[0] < 2e9:
-                                    return None, None
-                            kv_cache = get_kv_cache(h, start_pos, None, self.layers[full_layer_name])
+                                    return None, None  # TODO need fix
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name]))
                         else:
-                            kv_cache = get_kv_cache(h, start_pos, kv_cache_dict[full_layer_name], self.layers[full_layer_name])
-                        h = self.layers[full_layer_name](h, start_pos, freqs_cis, mask, kv_cache)
-                        kv_cache_dict[full_layer_name] = kv_cache
-                    elif layer_name == "norm":
-                        h = self.layers[full_layer_name](h)
-                    elif layer_name == "output":
-                        h = self.layers[full_layer_name](h)
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
+                    h_list = self.layers[full_layer_name]([t.h for t in task_list], [t.start_pos for t in task_list], global_freqs_cis, kv_cache_list)
+                    for i, t in enumerate(task_list):
+                        t.h = h_list[i]
+                        t.kv_cache_dict[full_layer_name] = kv_cache_list[i]
+                elif layer_name == "norm":
+                    _, _, sz = task_list[0].h.shape
+                    h = torch.cat([t.h.view(-1, sz) for t in task_list])
+                    h = self.layers[full_layer_name](h)
+                    start = 0
+                    for t in task_list:
+                        bsz, seqlen, sz = t.h.shape
+                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
+                        start += (bsz * seqlen)
+                elif layer_name == "output":
+                    _, _, sz = task_list[0].h.shape
+                    h = torch.cat([t.h.view(-1, sz) for t in task_list])
+                    h = self.layers[full_layer_name](h)
+                    sz = h.shape[-1]
+                    start = 0
+                    for t in task_list:
+                        bsz, seqlen, _ = t.h.shape
+                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
+                        start += (bsz * seqlen)
+                else:
+                    raise NotImplementedError("Unknown layers")
+            en = time.monotonic()
+            latency = (en-st)*1000
+            self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
+        for task in task_list:
+            task.call_back_queue.put((task.h, task.kv_cache_dict))
+
+    def layer_forward_engine(self):
+        q = self.layer_forward_engine_queue
+        while True:
+            task_list = []
+            task = q.get()
+            total_bsz = task.bsz
+            task_list.append(task)
+            while True:
+                try:
+                    task2 = q.get(block=False)
+                    if task2.layer_names == task.layer_names:
+                        task_list.append(task2)
+                        total_bsz += task2.bsz
+                        if total_bsz >= 16:
+                            break
                     else:
-                        raise NotImplementedError("Unknown layers")
-                en = time.monotonic()
-                latency = (en-st)*1000
-                self.perf_computation.append(((str(layer_names), str(list(input_shape))), latency))
+                        q.put(task2)
+                        break
+                except queue.Empty:
+                    break
+            # print("layer_forward_engine_step: ", len(task_list))
+            self.layer_forward_engine_step(task_list)
+
+    def start_layer_forward_engine(self):
+        heartbeat_thread = threading.Thread(target=self.layer_forward_engine)
+        heartbeat_thread.daemon = True
+        heartbeat_thread.start()
+
+    def layers_forward(self, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict):
+        q = queue.Queue()
+        self.layer_forward_engine_queue.put(LayerForward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, q))
+        h, kv_cache_dict = q.get()
+        del q
         return h, kv_cache_dict
 
     def send_update_task(self, task_manager_url, task_id, step):
@@ -555,9 +634,8 @@ class Worker:
             delta_round = 16
             eos_reached = self.task_eos_reached[task_id].to(main_device)
             prompt_tokens = self.task_prompt_tokens[task_id]
-            with self.same_node_mutex:
-                h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
-                                                                               kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
+            h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
+                                                                           kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
             self.task_eos_reached[task_id] = eos_reached.to("cpu")
             delta_round = len(tokens)+1
             round = round+delta_round-1
