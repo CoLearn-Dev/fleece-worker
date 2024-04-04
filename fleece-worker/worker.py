@@ -221,7 +221,6 @@ class Worker:
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
         self.mutex = threading.Lock()
-        self.same_node_mutex = threading.Lock()
         self.task_prompt_tokens: Dict[str, torch.Tensor] = dict()
         self.task_eos_reached: Dict[str, torch.Tensor] = dict()
         self.task_local_steps: Dict[str, List[int]] = dict()
@@ -447,15 +446,14 @@ class Worker:
                     if task2.layer_names == task.layer_names:
                         task_list.append(task2)
                         total_bsz += task2.bsz
-                        if total_bsz > 8:
+                        if total_bsz >= 16:
                             break
                     else:
                         q.put(task2)
                         break
                 except queue.Empty:
                     break
-            # if len(task_list) > 1:
-            #     print("layer_forward_engine_step: ", len(task_list))
+            # print("layer_forward_engine_step: ", len(task_list))
             self.layer_forward_engine_step(task_list)
 
     def start_layer_forward_engine(self):
@@ -636,9 +634,8 @@ class Worker:
             delta_round = 16
             eos_reached = self.task_eos_reached[task_id].to(main_device)
             prompt_tokens = self.task_prompt_tokens[task_id]
-            with self.same_node_mutex:
-                h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
-                                                                               kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
+            h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
+                                                                           kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
             self.task_eos_reached[task_id] = eos_reached.to("cpu")
             delta_round = len(tokens)+1
             round = round+delta_round-1
