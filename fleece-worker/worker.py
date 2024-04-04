@@ -373,15 +373,16 @@ class Worker:
             st = time.monotonic()
             for full_layer_name in task.layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
-                # if model_name.startswith("dummy"):
-                #     if layer_name == "output":
-                #         h = torch.zeros((task.bsz, 1, 32000), dtype=main_dtype)
-                #         h[:, :, task.round+10] = 1.0
-                #         if task.round >= 320:
-                #             h = torch.zeros((task.bsz, 1, 32000), dtype=main_dtype)
-                #             h[:, :, 2] = 1.0
-                #         # time.sleep(0.01)
-                #     continue
+                if model_name.startswith("dummy"):
+                    for t in task_list:
+                        if layer_name == "output":
+                            t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
+                            t.h[:, :, t.round+10] = 1.0
+                            if t.round >= 320:
+                                t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
+                                t.h[:, :, 2] = 1.0
+                            # time.sleep(0.01)
+                    continue
                 if layer_name == "tok_embeddings":
                     h = torch.cat([t.h.view(-1) for t in task_list])
                     h = self.layers[full_layer_name](h)

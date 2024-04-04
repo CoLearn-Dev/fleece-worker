@@ -57,8 +57,8 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=64)
 
 def forward(req: ForwardRequest):
     try:
-        executor.submit(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p,
-                        req.task_manager_url, req.signature, req.timestamp)
+        worker.forward(req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p,
+                       req.task_manager_url, req.signature, req.timestamp)
         return None
     except Exception as e:
         print(e)
