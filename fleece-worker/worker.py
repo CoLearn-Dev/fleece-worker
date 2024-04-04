@@ -342,7 +342,7 @@ class Worker:
 
     def send_forward(self, to_worker_id, data):
         url = self.get_worker_url(to_worker_id)
-        if (url is not None or url == "none") and to_worker_id != self.worker_id:
+        if (url is not None and url != "none") and to_worker_id != self.worker_id:
             if to_worker_id == self.worker_id:
                 # self.forward(**data)
                 send_request(
