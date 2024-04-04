@@ -14,7 +14,6 @@ import json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 import queue
-from anyio import from_thread
 
 torch.set_default_device("cpu")
 
@@ -216,6 +215,7 @@ class Worker:
         self.perf_computation = []
         self.perf_network = []
         self.peer: Optional[Peer] = None
+        self.async_portal = None
 
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
@@ -364,7 +364,7 @@ class Worker:
                 reply = await connection.send("forward", data)
                 if reply.status_code != 200:
                     self.cancel_task(data["task_id"])
-            from_thread.run_sync(self.peer.tg.start_soon, send)
+            self.async_portal.call(self.peer.tg.start_soon, send)
 
     def layer_forward_engine_step(self, task_list: List[LayerForward]):
         task = task_list[0]
