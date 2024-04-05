@@ -340,6 +340,9 @@ class Worker:
             return False
 
     def send_forward(self, to_worker_id, data):
+        if to_worker_id == self.worker_id:
+            executor.submit(self.forward, **data)
+            return
         url = self.get_worker_url(to_worker_id)
         if (url is not None and url != "none") and to_worker_id != self.worker_id:
             if to_worker_id == self.worker_id:
@@ -553,14 +556,14 @@ class Worker:
                 task_id: str,
                 plan: List[Tuple[str, List[str]]],
                 step: int,
-                round: int,
-                payload: List,
-                max_total_len: int,
-                temperature: float,
-                top_p: float,
-                task_manager_url: str,
-                signature: str,
-                timestamp: int,
+                round: int = -1,
+                payload: Optional[List] = None,
+                max_total_len: int = 2048,
+                temperature: float = 0.0,
+                top_p: float = 0.9,
+                task_manager_url: Optional[str] = None,
+                signature: Optional[str] = None,
+                timestamp: Optional[int] = None,
                 ):
         self.verify(task_manager_url, task_id, plan, timestamp, signature)
 
@@ -639,13 +642,13 @@ class Worker:
             self.task_eos_reached[task_id] = eos_reached.to("cpu")
             delta_round = len(tokens)+1
             round = round+delta_round-1
+            start_pos = start_pos+delta_round-1
         else:
-            delta_round = 1
             h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict)
         if h is None:
             return
         else:
-            self.task_info[(task_id, step)] = (start_pos+seqlen+delta_round-1, kv_cache_dict)
+            self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
 
         # last node
         if index == len(plan)-1:
