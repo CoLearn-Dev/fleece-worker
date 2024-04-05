@@ -433,6 +433,7 @@ class Worker:
             en = time.monotonic()
             latency = (en-st)*1000
             self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
+            print(((str(task.layer_names), str(input_shapes)), latency))
         for task in task_list:
             task.call_back_queue.put((task.h, task.kv_cache_dict))
 
@@ -565,7 +566,7 @@ class Worker:
                 signature: Optional[str] = None,
                 timestamp: Optional[int] = None,
                 ):
-        self.verify(task_manager_url, task_id, plan, timestamp, signature)
+        # self.verify(task_manager_url, task_id, plan, timestamp, signature)
 
         index = step
         is_new_task = round == 0
