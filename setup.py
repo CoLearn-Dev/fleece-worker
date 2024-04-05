@@ -20,6 +20,8 @@ setup(
     name="fleece-worker",
     version=get_version('fleece-worker/__init__.py'),
     description="fleece-worker",
+    long_description=open('README.md').read(),
+    long_description_content_type='text/markdown',
     author="stneng",
     author_email="git@stneng.com",
     url="https://github.com/CoLearn-Dev/fleece-worker",
