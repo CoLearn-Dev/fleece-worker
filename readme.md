@@ -1,5 +1,11 @@
 ## Installation
 
+### Install From PyPI
+```
+pip install fleece-worker
+```
+
+### Install From Source
 ```
 pip install -e .
 ```

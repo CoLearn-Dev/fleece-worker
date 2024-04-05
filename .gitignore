@@ -1,3 +1,4 @@
 *.pyc
+/build/
 /fleece_worker.egg-info/
 /.vscode/

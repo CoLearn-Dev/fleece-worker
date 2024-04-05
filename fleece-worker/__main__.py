@@ -1,11 +1,11 @@
-import traceback
-from typing import Any, List, Tuple, Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from typing import List, Tuple, Optional
+from fastapi import FastAPI, HTTPException
 from peerrtc.peer import Peer
 from pydantic import BaseModel
 import anyio
 import uvicorn
 from .worker import Worker
+from .__init__ import __version__
 import argparse
 import requests
 import json
@@ -122,7 +122,7 @@ async def main() -> None:
         worker.heartbeat_interval = int(args.heartbeat_interval)
     if args.controller_url is not None:
         worker.controller_url = args.controller_url
-        data = {"url": worker_url}
+        data = {"url": worker_url, "version": __version__}
         if worker.worker_nickname is not None:
             data["nickname"] = worker.worker_nickname
         if torch.cuda.is_available():
@@ -143,6 +143,8 @@ async def main() -> None:
         worker.pull_worker_url()
         worker.start_heartbeat_daemon()
         worker.start_layer_forward_engine()
+
+        print("Worker ID: ", worker.worker_id)
 
         r = requests.get(
             f"{args.controller_url}/get_network_servers",
