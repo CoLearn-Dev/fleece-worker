@@ -14,6 +14,7 @@ import json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 import queue
+import copy
 
 torch.set_default_device("cpu")
 
@@ -42,7 +43,7 @@ def parse_layer_name(layer_name: str):
     return s[0], s[1]
 
 
-KV_CACHE_BLOCK = 512
+KV_CACHE_BLOCK = 128
 
 
 def get_kv_cache_length(cur, seqlen):
@@ -202,7 +203,7 @@ class Worker:
             self,
             worker_id: str = None,
             # mirror_url: str = "TODO",
-            cache_dir: str = "~/.cache/fleece-worker/models",
+            cache_dir: str = "/dev/shm/fleece-worker/models",
     ):
         self.worker_id = worker_id
         # self.mirror_url = mirror_url
@@ -219,6 +220,7 @@ class Worker:
 
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
+        self.layers_copy = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
         self.mutex = threading.Lock()
         self.task_prompt_tokens: Dict[str, torch.Tensor] = dict()
@@ -250,7 +252,14 @@ class Worker:
                     continue
                 th = executor.submit(self.fetch_layer, full_layer_name)
                 ths.append((full_layer_name, th))
+            if len(ths) > 0:
+                st = time.time()
             for full_layer_name, th in ths:
+                if full_layer_name in self.layers_copy:
+                    a = copy.deepcopy(self.layers_copy[full_layer_name])
+                    a.to(main_device)
+                    self.layers[full_layer_name] = a
+                    continue
                 path = th.result()
                 model_name, layer_name = parse_layer_name(full_layer_name)
                 if model_name.startswith("dummy"):
@@ -274,8 +283,13 @@ class Worker:
                 else:
                     raise NotImplementedError("Unknown layers")
                 l.load_state_dict(torch.load(path, map_location="cpu"))
+                a = copy.deepcopy(l)
+                self.layers_copy[full_layer_name] = a
                 l.to(main_device)
                 self.layers[full_layer_name] = l
+            if len(ths) > 0:
+                en = time.time()
+                print(en-st)
 
     def unload_layers(self, layer_names: List[str]):
         for full_layer_name in layer_names:
@@ -283,6 +297,13 @@ class Worker:
                 continue  # TODO continue or warning?
             del self.layers[full_layer_name]
             torch.cuda.empty_cache()
+
+    def unload_all_layers(self):
+        layers = list(self.layers.keys())
+        for full_layer_name in layers:
+            if full_layer_name not in self.layers:
+                continue  # TODO continue or warning?
+            del self.layers[full_layer_name]
 
     def cancel_task(self, task_id: str):
         self.del_task(task_id)
@@ -433,6 +454,7 @@ class Worker:
             en = time.monotonic()
             latency = (en-st)*1000
             self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
+        self.unload_all_layers()
         for task in task_list:
             task.call_back_queue.put((task.h, task.kv_cache_dict))
 
@@ -445,18 +467,18 @@ class Worker:
             task_list.append(task)
             while True:
                 try:
-                    task2 = q.get(block=False)
+                    task2 = q.get(block=True)
                     if task2.layer_names == task.layer_names:
                         task_list.append(task2)
                         total_bsz += task2.bsz
-                        if total_bsz >= 16:
+                        if total_bsz >= 32:
                             break
                     else:
                         q.put(task2)
                         break
                 except queue.Empty:
                     break
-            # print("layer_forward_engine_step: ", len(task_list))
+            print("layer_forward_engine_step: ", len(task_list))
             self.layer_forward_engine_step(task_list)
 
     def start_layer_forward_engine(self):
