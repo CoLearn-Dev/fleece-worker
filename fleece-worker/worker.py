@@ -42,7 +42,7 @@ def parse_layer_name(layer_name: str):
     return s[0], s[1]
 
 
-KV_CACHE_BLOCK = 512
+KV_CACHE_BLOCK = 128
 
 
 def get_kv_cache_length(cur, seqlen):
@@ -524,15 +524,12 @@ class Worker:
                 if start_pos > max_total_len:
                     next_token = torch.tensor([2] * bsz, device=main_device)  # FIXME fake max length limit
                 # print(next_token)
-                next_token = next_token
                 # eos_reached
-                if is_new_task:
-                    eos_reached = torch.tensor([False] * bsz, device=main_device)
-                eos_reached |= next_token == 2  # eos_id
-                if all(eos_reached) or i == delta_round-1:
+                if all(eos_reached | (next_token == 2)) or i == delta_round-1:
                     return h, kv_cache_dict, ans_tokens, eos_reached
 
                 # loop
+                eos_reached |= next_token == 2  # eos_id
                 ans_tokens.append(next_token)
                 start_pos = start_pos+seqlen
                 seqlen = 1
@@ -546,7 +543,6 @@ class Worker:
                     else:
                         tokens[k, :] = next_token[k]
                 h = tokens
-            return h, kv_cache_dict, ans_tokens, eos_reached
         finally:
             # update_task
             for i, output_tokens in enumerate(ans_tokens):

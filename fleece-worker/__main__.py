@@ -177,7 +177,7 @@ async def main() -> None:
                     app.add_api_route("/forward", forward, methods=["POST"])
                     app.add_api_route("/get_info", get_info, methods=["POST"])
 
-                    uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=True)
+                    uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=False)
                     uviserver = uvicorn.Server(uviconfig)
                     tg.start_soon(uviserver.serve)
             await portal.sleep_until_stopped()
