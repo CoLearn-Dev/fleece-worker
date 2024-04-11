@@ -251,7 +251,7 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        x_list: List[torch.Tensor],
+        bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
         kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -273,12 +273,12 @@ class Attention(nn.Module):
 
         start = 0
         output_list = []
-        for i, x in enumerate(x_list):
-            bsz, seqlen, _ = x.shape
-            xq = xq_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_heads, self.head_dim)
-            xk = xk_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            start += (bsz * seqlen)
+        for i, bsz in enumerate(bsz_list):
+            _, seqlen, _ = x.shape
+            xq = xq_[start:start+bsz].view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            start += bsz
 
             start_pos = start_pos_list[i]
             kv_cache = kv_cache_list[i]
@@ -325,8 +325,7 @@ class Attention(nn.Module):
                 output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
                 output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
             output_list.append(output)
-        _, _, sz = output_list[0].shape
-        output = torch.cat([x.view(-1, sz) for x in output_list])
+        output = torch.cat([x for x in output_list])
         return self.wo(output)
 
 
@@ -413,7 +412,8 @@ class TransformerBlock(nn.Module):
     @torch.inference_mode()
     def forward(
         self,
-        x_list: List[torch.Tensor],
+        x: torch.Tensor,
+        bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
         kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -431,19 +431,11 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        _, _, sz = x_list[0].shape
-        x = torch.cat([x.view(-1, sz) for x in x_list])
         h = x + self.attention.forward(
-            self.attention_norm(x), x_list, start_pos_list, global_freqs_cis, kv_cache_list
+            self.attention_norm(x), bsz_list, start_pos_list, global_freqs_cis, kv_cache_list
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        out_list = []
-        start = 0
-        for x in x_list:
-            bsz, seqlen, sz = x.shape
-            out_list.append(out[start:start+(bsz * seqlen)].view(bsz, seqlen, sz))
-            start += (bsz * seqlen)
-        return out_list
+        return out
 
 
 # class Transformer(nn.Module):

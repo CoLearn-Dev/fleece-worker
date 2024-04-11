@@ -52,7 +52,7 @@ def get_kv_cache_length(cur, seqlen):
 
 
 def get_kv_cache(x, start_pos, kv_cache, model):
-    bsz, seqlen, _ = x.shape
+    bsz, seqlen = x.shape[0], x.shape[1]
     if kv_cache is None:
         length = get_kv_cache_length(0, start_pos + seqlen)
         cache_k = torch.zeros(
@@ -373,27 +373,23 @@ class Worker:
         with torch.inference_mode():
             input_shapes = [list(t.h.shape) for t in task_list]
             st = time.monotonic()
+            h = torch.cat([t.h for t in task_list])
+            bsz_list, start_pos_list = [t.bsz for t in task_list], [t.start_pos for t in task_list]
             for full_layer_name in task.layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
                 if model_name.startswith("dummy"):
-                    for t in task_list:
-                        if layer_name == "output":
+                    if layer_name == "output":
+                        for t in task_list:
                             t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
                             t.h[:, :, t.round+10] = 1.0
                             if t.round >= 320:
                                 t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
                                 t.h[:, :, 2] = 1.0
                             # time.sleep(0.01)
+                        h = torch.cat([t.h for t in task_list])
                     continue
                 if layer_name == "tok_embeddings":
-                    h = torch.cat([t.h.view(-1) for t in task_list])
                     h = self.layers[full_layer_name](h)
-                    sz = h.shape[-1]
-                    start = 0
-                    for t in task_list:
-                        bsz, seqlen = t.h.shape
-                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
-                        start += (bsz * seqlen)
                 elif layer_name.startswith("layers."):
                     kv_cache_list = []
                     for t in task_list:
@@ -405,31 +401,20 @@ class Worker:
                             kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name]))
                         else:
                             kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
-                    h_list = self.layers[full_layer_name]([t.h for t in task_list], [t.start_pos for t in task_list], global_freqs_cis, kv_cache_list)
+                    h = self.layers[full_layer_name](h, bsz_list, start_pos_list, global_freqs_cis, kv_cache_list)
                     for i, t in enumerate(task_list):
-                        t.h = h_list[i]
                         t.kv_cache_dict[full_layer_name] = kv_cache_list[i]
                 elif layer_name == "norm":
-                    _, _, sz = task_list[0].h.shape
-                    h = torch.cat([t.h.view(-1, sz) for t in task_list])
                     h = self.layers[full_layer_name](h)
-                    start = 0
-                    for t in task_list:
-                        bsz, seqlen, sz = t.h.shape
-                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
-                        start += (bsz * seqlen)
                 elif layer_name == "output":
-                    _, _, sz = task_list[0].h.shape
-                    h = torch.cat([t.h.view(-1, sz) for t in task_list])
                     h = self.layers[full_layer_name](h)
-                    sz = h.shape[-1]
-                    start = 0
-                    for t in task_list:
-                        bsz, seqlen, _ = t.h.shape
-                        t.h = h[start:start+(bsz * seqlen)].view(bsz, seqlen, sz)
-                        start += (bsz * seqlen)
                 else:
                     raise NotImplementedError("Unknown layers")
+            start = 0
+            for t in task_list:
+                bsz = t.bsz
+                t.h = h[start:start+bsz]
+                start += bsz
             en = time.monotonic()
             latency = (en-st)*1000
             self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
@@ -446,7 +431,7 @@ class Worker:
             while True:
                 try:
                     task2 = q.get(block=False)
-                    if task2.layer_names == task.layer_names:
+                    if task2.seqlen == task.seqlen and task2.layer_names == task.layer_names:
                         task_list.append(task2)
                         total_bsz += task2.bsz
                         if total_bsz >= 16:
