@@ -8,6 +8,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+ENABLE_FLASH_ATTN = False
+try:
+    from flash_attn import flash_attn_with_kvcache
+    ENABLE_FLASH_ATTN = True
+except ImportError as e:
+    print("Package flash-attn is not found. Please install it for better performance. https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features")
+
 
 @dataclass
 class ModelArgs:
@@ -94,7 +101,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    if ENABLE_FLASH_ATTN:
+        freqs_cis = torch.stack([freqs.cos(), freqs.sin()])  # flash_attn
+    else:
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
 
@@ -272,39 +282,48 @@ class Attention(nn.Module):
 
             start_pos = start_pos_list[i]
             kv_cache = kv_cache_list[i]
-            freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
-            mask = None
-            if seqlen > 1:
-                mask = torch.full(
-                    (1, 1, seqlen, seqlen), float("-inf"), device=x.device
-                )
-                mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
-
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
-            # self.cache_k = self.cache_k.to(xq)
-            # self.cache_v = self.cache_v.to(xq)
-
             cache_k, cache_v = kv_cache
-            cache_k[:bsz, start_pos: start_pos + seqlen] = xk
-            cache_v[:bsz, start_pos: start_pos + seqlen] = xv
 
-            keys = cache_k[:bsz, : start_pos + seqlen]
-            values = cache_v[:bsz, : start_pos + seqlen]
+            if ENABLE_FLASH_ATTN:
+                cos = global_freqs_cis[0].type_as(xq)
+                sin = global_freqs_cis[1].type_as(xq)
+                output = flash_attn_with_kvcache(xq, cache_k, cache_v, xk, xv,
+                                                 rotary_cos=cos, rotary_sin=sin,
+                                                 cache_seqlens=start_pos, causal=True, rotary_interleaved=True)
+                output = output.view(bsz, seqlen, -1)
+            else:
+                freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
+                mask = None
+                if seqlen > 1:
+                    mask = torch.full(
+                        (1, 1, seqlen, seqlen), float("-inf"), device=x.device
+                    )
+                    mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
 
-            # repeat k/v heads if n_kv_heads < n_heads
-            keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-            values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+                xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-            keys = keys.transpose(1, 2)
-            values = values.transpose(1, 2)
-            scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if mask is not None:
-                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+                # self.cache_k = self.cache_k.to(xq)
+                # self.cache_v = self.cache_v.to(xq)
+
+                cache_k[:bsz, start_pos: start_pos + seqlen] = xk
+                cache_v[:bsz, start_pos: start_pos + seqlen] = xv
+
+                keys = cache_k[:bsz, : start_pos + seqlen]
+                values = cache_v[:bsz, : start_pos + seqlen]
+
+                # repeat k/v heads if n_kv_heads < n_heads
+                keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+                values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+                xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+                keys = keys.transpose(1, 2)
+                values = values.transpose(1, 2)
+                scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+                if mask is not None:
+                    scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+                scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+                output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+                output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
             output_list.append(output)
         _, _, sz = output_list[0].shape
         output = torch.cat([x.view(-1, sz) for x in output_list])

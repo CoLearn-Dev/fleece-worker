@@ -181,6 +181,19 @@ async def main() -> None:
                     uviserver = uvicorn.Server(uviconfig)
                     tg.start_soon(uviserver.serve)
             await portal.sleep_until_stopped()
+    else:
+        worker.worker_id = "local"
+        worker.start_layer_forward_engine()
+        async with anyio.create_task_group() as tg:
+            if worker_url != "none":
+                app.add_api_route("/preload_layers", preload_layers, methods=["POST"])
+                app.add_api_route("/unload_layers", unload_layers, methods=["POST"])
+                app.add_api_route("/forward", forward, methods=["POST"])
+                app.add_api_route("/get_info", get_info, methods=["POST"])
+
+                uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=True)
+                uviserver = uvicorn.Server(uviconfig)
+                tg.start_soon(uviserver.serve)
 
 
 if __name__ == '__main__':
