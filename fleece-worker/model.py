@@ -8,6 +8,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+ENABLE_FLASH_ATTN = False
+try:
+    from flash_attn import flash_attn_with_kvcache
+    ENABLE_FLASH_ATTN = True
+except ImportError as e:
+    print("Package flash-attn is not found. Please install it for better performance. https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features")
+
 
 @dataclass
 class ModelArgs:
@@ -94,7 +101,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    if ENABLE_FLASH_ATTN:
+        freqs_cis = torch.stack([freqs.cos(), freqs.sin()])  # flash_attn
+    else:
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
 
@@ -241,7 +251,7 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        x_list: List[torch.Tensor],
+        bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
         kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -263,51 +273,59 @@ class Attention(nn.Module):
 
         start = 0
         output_list = []
-        for i, x in enumerate(x_list):
-            bsz, seqlen, _ = x.shape
-            xq = xq_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_heads, self.head_dim)
-            xk = xk_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv_[start:start+(bsz * seqlen)].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            start += (bsz * seqlen)
+        for i, bsz in enumerate(bsz_list):
+            _, seqlen, _ = x.shape
+            xq = xq_[start:start+bsz].view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            start += bsz
 
             start_pos = start_pos_list[i]
             kv_cache = kv_cache_list[i]
-            freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
-            mask = None
-            if seqlen > 1:
-                mask = torch.full(
-                    (1, 1, seqlen, seqlen), float("-inf"), device=x.device
-                )
-                mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
-
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
-            # self.cache_k = self.cache_k.to(xq)
-            # self.cache_v = self.cache_v.to(xq)
-
             cache_k, cache_v = kv_cache
-            cache_k[:bsz, start_pos: start_pos + seqlen] = xk
-            cache_v[:bsz, start_pos: start_pos + seqlen] = xv
 
-            keys = cache_k[:bsz, : start_pos + seqlen]
-            values = cache_v[:bsz, : start_pos + seqlen]
+            if ENABLE_FLASH_ATTN:
+                cos = global_freqs_cis[0].type_as(xq)
+                sin = global_freqs_cis[1].type_as(xq)
+                output = flash_attn_with_kvcache(xq, cache_k, cache_v, xk, xv,
+                                                 rotary_cos=cos, rotary_sin=sin,
+                                                 cache_seqlens=start_pos, causal=True, rotary_interleaved=True)
+                output = output.view(bsz, seqlen, -1)
+            else:
+                freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
+                mask = None
+                if seqlen > 1:
+                    mask = torch.full(
+                        (1, 1, seqlen, seqlen), float("-inf"), device=x.device
+                    )
+                    mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
 
-            # repeat k/v heads if n_kv_heads < n_heads
-            keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-            values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+                xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-            keys = keys.transpose(1, 2)
-            values = values.transpose(1, 2)
-            scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if mask is not None:
-                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+                # self.cache_k = self.cache_k.to(xq)
+                # self.cache_v = self.cache_v.to(xq)
+
+                cache_k[:bsz, start_pos: start_pos + seqlen] = xk
+                cache_v[:bsz, start_pos: start_pos + seqlen] = xv
+
+                keys = cache_k[:bsz, : start_pos + seqlen]
+                values = cache_v[:bsz, : start_pos + seqlen]
+
+                # repeat k/v heads if n_kv_heads < n_heads
+                keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+                values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+                xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+                keys = keys.transpose(1, 2)
+                values = values.transpose(1, 2)
+                scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+                if mask is not None:
+                    scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+                scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+                output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+                output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
             output_list.append(output)
-        _, _, sz = output_list[0].shape
-        output = torch.cat([x.view(-1, sz) for x in output_list])
+        output = torch.cat([x for x in output_list])
         return self.wo(output)
 
 
@@ -394,7 +412,8 @@ class TransformerBlock(nn.Module):
     @torch.inference_mode()
     def forward(
         self,
-        x_list: List[torch.Tensor],
+        x: torch.Tensor,
+        bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
         kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -412,19 +431,11 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        _, _, sz = x_list[0].shape
-        x = torch.cat([x.view(-1, sz) for x in x_list])
         h = x + self.attention.forward(
-            self.attention_norm(x), x_list, start_pos_list, global_freqs_cis, kv_cache_list
+            self.attention_norm(x), bsz_list, start_pos_list, global_freqs_cis, kv_cache_list
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        out_list = []
-        start = 0
-        for x in x_list:
-            bsz, seqlen, sz = x.shape
-            out_list.append(out[start:start+(bsz * seqlen)].view(bsz, seqlen, sz))
-            start += (bsz * seqlen)
-        return out_list
+        return out
 
 
 # class Transformer(nn.Module):
