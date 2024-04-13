@@ -269,29 +269,46 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
+        _, seqlen, _ = x.shape
         xq_, xk_, xv_ = self.wq(x), self.wk(x), self.wv(x)
 
-        start = 0
-        output_list = []
-        for i, bsz in enumerate(bsz_list):
-            _, seqlen, _ = x.shape
-            xq = xq_[start:start+bsz].view(bsz, seqlen, self.n_local_heads, self.head_dim)
-            xk = xk_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            start += bsz
+        if ENABLE_FLASH_ATTN:
+            cache_k = torch.cat([k for k, _ in kv_cache_list])  # mem copy!!!
+            cache_v = torch.cat([v for _, v in kv_cache_list])  # mem copy!!!
+            cache_seqlens = []
+            for i, bsz in enumerate(bsz_list):
+                cache_seqlens.append(start_pos_list[i]*bsz)
+            cache_seqlens = torch.tensor(cache_seqlens, dtype=torch.int32, device=x.device)
+            bsz = cache_seqlens.shape[0]
 
-            start_pos = start_pos_list[i]
-            kv_cache = kv_cache_list[i]
-            cache_k, cache_v = kv_cache
+            xq = xq_.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            cos = global_freqs_cis[0].type_as(xq)
+            sin = global_freqs_cis[1].type_as(xq)
+            output = flash_attn_with_kvcache(xq, cache_k, cache_v, xk, xv,
+                                             rotary_cos=cos, rotary_sin=sin,
+                                             cache_seqlens=cache_seqlens, causal=True, rotary_interleaved=True)
+            output = output.view(bsz, seqlen, -1)
+            start = 0
+            for i, bsz in enumerate(bsz_list):
+                start_pos = start_pos_list[i]
+                kv_cache_list[i][0][:, start_pos:start_pos+seqlen] = cache_k[start:start+bsz, start_pos:start_pos+seqlen]
+                kv_cache_list[i][1][:, start_pos:start_pos+seqlen] = cache_v[start:start+bsz, start_pos:start_pos+seqlen]
+                start += bsz
+        else:
+            start = 0
+            output_list = []
+            for i, bsz in enumerate(bsz_list):
+                xq = xq_[start:start+bsz].view(bsz, seqlen, self.n_local_heads, self.head_dim)
+                xk = xk_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+                xv = xv_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+                start += bsz
 
-            if ENABLE_FLASH_ATTN:
-                cos = global_freqs_cis[0].type_as(xq)
-                sin = global_freqs_cis[1].type_as(xq)
-                output = flash_attn_with_kvcache(xq, cache_k, cache_v, xk, xv,
-                                                 rotary_cos=cos, rotary_sin=sin,
-                                                 cache_seqlens=start_pos, causal=True, rotary_interleaved=True)
-                output = output.view(bsz, seqlen, -1)
-            else:
+                start_pos = start_pos_list[i]
+                kv_cache = kv_cache_list[i]
+                cache_k, cache_v = kv_cache
+
                 freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
                 mask = None
                 if seqlen > 1:
@@ -324,8 +341,8 @@ class Attention(nn.Module):
                 scores = F.softmax(scores.float(), dim=-1).type_as(xq)
                 output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
                 output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-            output_list.append(output)
-        output = torch.cat([x for x in output_list])
+                output_list.append(output)
+            output = torch.cat([x for x in output_list])
         return self.wo(output)
 
 
