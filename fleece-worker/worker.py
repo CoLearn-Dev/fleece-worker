@@ -3,7 +3,7 @@ import os
 import torch
 from torch import nn
 from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
-from peerrtc.peer import Peer
+from fleece_network import Peer
 import requests
 import threading
 import concurrent.futures

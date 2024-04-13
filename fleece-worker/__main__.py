@@ -1,6 +1,6 @@
 from typing import List, Tuple, Optional
 from fastapi import FastAPI, HTTPException
-from peerrtc.peer import Peer
+from fleece_network import Peer
 from pydantic import BaseModel
 import anyio
 import uvicorn
