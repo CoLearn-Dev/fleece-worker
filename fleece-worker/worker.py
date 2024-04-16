@@ -3,7 +3,7 @@ import os
 import torch
 from torch import nn
 from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
-from peerrtc.peer import Peer
+# from peerrtc.peer import Peer
 import requests
 import threading
 import concurrent.futures
@@ -214,7 +214,7 @@ class Worker:
         self.worker_urls = {}
         self.perf_computation = []
         self.perf_network = []
-        self.peer: Optional[Peer] = None
+        # self.peer: Optional[Peer] = None
         self.async_portal = None
 
         self.cache_dir = os.path.expanduser(cache_dir)
@@ -361,17 +361,19 @@ class Worker:
                     worker=self,
                     to_worker_id=to_worker_id)
         else:
-            async def send():
-                connection = await self.peer.connect(to_worker_id)
-                reply = await connection.send("forward", data)
-                if reply.status_code != 200:
-                    self.cancel_task(data["task_id"])
-            self.async_portal.call(self.peer.tg.start_soon, send)
+            pass
+            # async def send():
+            #     connection = await self.peer.connect(to_worker_id)
+            #     reply = await connection.send("forward", data)
+            #     if reply.status_code != 200:
+            #         self.cancel_task(data["task_id"])
+            # self.async_portal.call(self.peer.tg.start_soon, send)
 
     def layer_forward_engine_step(self, task_list: List[LayerForward]):
         task = task_list[0]
         with torch.inference_mode():
             input_shapes = [list(t.h.shape) for t in task_list]
+            torch.cuda.synchronize()
             st = time.monotonic()
             for full_layer_name in task.layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
@@ -430,6 +432,7 @@ class Worker:
                         start += (bsz * seqlen)
                 else:
                     raise NotImplementedError("Unknown layers")
+            torch.cuda.synchronize()
             en = time.monotonic()
             latency = (en-st)*1000
             self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))

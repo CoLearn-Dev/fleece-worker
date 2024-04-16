@@ -34,8 +34,7 @@ setup(
         "fastapi",
         "uvicorn",
         "requests",
-        "cryptography",
-        "fleece-network"
+        "cryptography"
     ],
     python_requires=">=3.10",
 )
