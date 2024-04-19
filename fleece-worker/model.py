@@ -1,4 +1,4 @@
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# This software may be used and distributed according to the terms of the Llama 3 Community License Agreement.
 
 import math
 from dataclasses import dataclass
@@ -26,6 +26,7 @@ class ModelArgs:
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
+    rope_theta: float = 500000
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
@@ -99,8 +100,8 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
+    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+    freqs = torch.outer(t, freqs)
     if ENABLE_FLASH_ATTN:
         freqs_cis = torch.stack([freqs.cos(), freqs.sin()])  # flash_attn
     else:

@@ -20,21 +20,46 @@ torch.set_default_device("cpu")
 llama_2_7b_args = {"dim": 4096, "multiple_of": 256, "n_heads": 32, "n_layers": 32, "norm_eps": 1e-06, "vocab_size": 32000}
 llama_2_13b_args = {"dim": 5120, "multiple_of": 256, "n_heads": 40, "n_layers": 40, "norm_eps": 1e-05, "vocab_size": 32000}
 llama_2_70b_args = {"dim": 8192, "multiple_of": 4096, "ffn_dim_multiplier": 1.3, "n_heads": 64, "n_kv_heads": 8, "n_layers": 80, "norm_eps": 1e-05, "vocab_size": 32000}
+llama_3_8b_args = {"dim": 4096, "n_layers": 32, "n_heads": 32, "n_kv_heads": 8, "vocab_size": 128256, "multiple_of": 1024, "ffn_dim_multiplier": 1.3, "norm_eps": 1e-05, "rope_theta": 500000.0}
+llama_3_70b_args = {"dim": 8192, "ffn_dim_multiplier": 1.3, "multiple_of": 1024, "n_heads": 64, "n_kv_heads": 8, "n_layers": 80, "norm_eps": 1e-05, "vocab_size": 128256, "rope_theta": 500000.0}
 
 if torch.cuda.is_available():
     main_device = "cuda"
+    # if torch.cuda.is_bf16_supported():
+    #     main_dtype = torch.bfloat16
+    #     torch.set_default_dtype(torch.bfloat16)
+    # else:
     main_dtype = torch.float16
     torch.set_default_dtype(torch.float16)
 else:
     main_device = "cpu"
     main_dtype = torch.float32
     torch.set_default_dtype(torch.float32)
-global_freqs_cis = precompute_freqs_cis(128, 4096).to(main_device)
+
+# llama 2
+# global_freqs_cis = precompute_freqs_cis(128, 4096).to(main_device)
+# EOS_ID = 2
+# STOP_TOKEN_IDS = [2]
+# VOCAL_SIZE = 32000
 # tokenizer = Tokenizer(model_path="/home/ubuntu/llama/tokenizer.model")
 # print(tokenizer.bos_id) 1
 # print(tokenizer.eos_id) 2
 # print(tokenizer.pad_id) -1
 # print(tokenizer.n_words) 32000
+
+# llama 3
+global_freqs_cis = precompute_freqs_cis(128, 8192, 500000.0).to(main_device)
+EOS_ID = 128001
+STOP_TOKEN_IDS = [128001, 128009]
+VOCAL_SIZE = 128256
+# tokenizer = Tokenizer(model_path="./Meta-Llama-3-8B-Instruct/tokenizer.model")
+# print(tokenizer.bos_id) 128000
+# print(tokenizer.eos_id) 128001
+# print(tokenizer.pad_id) -1
+# print(tokenizer.n_words) 128256
+
+stop_tokens = torch.tensor(STOP_TOKEN_IDS, device=main_device)
+stop_tokens_cpu = torch.tensor(STOP_TOKEN_IDS)
 
 
 def parse_layer_name(layer_name: str):
@@ -261,6 +286,10 @@ class Worker:
                     model_args = ModelArgs(**llama_2_13b_args)
                 elif model_name.startswith("llama-2-70b"):
                     model_args = ModelArgs(**llama_2_70b_args)
+                elif model_name.startswith("llama-3-8b"):
+                    model_args = ModelArgs(**llama_3_8b_args)
+                elif model_name.startswith("llama-3-70b"):
+                    model_args = ModelArgs(**llama_3_70b_args)
                 else:
                     raise NotImplementedError("Unknown model")
                 if layer_name == "tok_embeddings":
@@ -380,11 +409,11 @@ class Worker:
                 if model_name.startswith("dummy"):
                     if layer_name == "output":
                         for t in task_list:
-                            t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
+                            t.h = torch.zeros((t.bsz, 1, VOCAL_SIZE), dtype=main_dtype, device=main_device)
                             t.h[:, :, t.round+10] = 1.0
                             if t.round >= 320:
-                                t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
-                                t.h[:, :, 2] = 1.0
+                                t.h = torch.zeros((t.bsz, 1, VOCAL_SIZE), dtype=main_dtype, device=main_device)
+                                t.h[:, :, EOS_ID] = 1.0
                             # time.sleep(0.01)
                         h = torch.cat([t.h for t in task_list])
                     continue
@@ -507,14 +536,14 @@ class Worker:
                     next_token = torch.argmax(h[:, -1], dim=-1)
                 next_token = next_token.reshape(-1)
                 if start_pos > max_total_len:
-                    next_token = torch.tensor([2] * bsz, device=main_device)  # FIXME fake max length limit
+                    next_token = torch.tensor([EOS_ID] * bsz, device=main_device)  # FIXME fake max length limit
                 # print(next_token)
                 # eos_reached
-                if all(eos_reached | (next_token == 2)) or i == delta_round-1:
+                if all(eos_reached | torch.isin(next_token, stop_tokens)) or i == delta_round-1:
                     return h, kv_cache_dict, ans_tokens, eos_reached
 
                 # loop
-                eos_reached |= next_token == 2  # eos_id
+                eos_reached |= torch.isin(next_token, stop_tokens)  # eos_id
                 ans_tokens.append(next_token)
                 start_pos = start_pos+seqlen
                 seqlen = 1
@@ -640,12 +669,12 @@ class Worker:
                 next_token = torch.argmax(h[:, -1], dim=-1)
             next_token = next_token.reshape(-1)
             if start_pos > max_total_len:
-                next_token = torch.tensor([2] * bsz)  # FIXME fake max length limit
+                next_token = torch.tensor([EOS_ID] * bsz)  # FIXME fake max length limit
             # print(next_token)
             next_token = next_token.to("cpu")
 
             # eos_reached
-            self.task_eos_reached[task_id] |= next_token == 2  # eos_id
+            self.task_eos_reached[task_id] |= torch.isin(next_token, stop_tokens_cpu)  # eos_id
             if not all(self.task_eos_reached[task_id]):
                 # next node
                 self.send_forward(
