@@ -14,6 +14,7 @@ import json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 import queue
+import traceback
 
 torch.set_default_device("cpu")
 
@@ -313,8 +314,9 @@ class Worker:
             del self.layers[full_layer_name]
             torch.cuda.empty_cache()
 
-    def cancel_task(self, task_id: str):
-        self.del_task(task_id)
+    def cancel_task(self, task_id: str, del_task=False):
+        if del_task:
+            self.del_task(task_id)
         self.canceled_task.add(task_id)
 
     def del_task(self, task_id: str):
@@ -575,13 +577,141 @@ class Worker:
                 signature: Optional[str] = None,
                 timestamp: Optional[int] = None,
                 ):
-        self.verify(task_manager_url, task_id, plan, timestamp, signature)
+        try:
+            self.verify(task_manager_url, task_id, plan, timestamp, signature)
 
-        index = step
-        is_new_task = round == 0
-        if payload is None or task_id in self.canceled_task:
-            self.del_task(task_id)
-            if index < len(plan)-1:
+            index = step
+            is_new_task = round == 0
+            if payload is None or task_id in self.canceled_task:
+                self.del_task(task_id)
+                if index < len(plan)-1:
+                    # next node
+                    self.send_forward(
+                        plan[index+1][0],
+                        data={
+                            "task_id": task_id,
+                            "plan": plan,
+                            "step": step+1,
+                            "task_manager_url": task_manager_url,
+                            "signature": signature,
+                            "timestamp": timestamp,
+                        })
+                return
+
+            if is_new_task:
+                if task_id in self.task_local_steps:
+                    self.task_local_steps[task_id].append(step)
+                else:
+                    self.task_local_steps[task_id] = [step]
+                self.task_info[(task_id, step)] = (0, dict())
+            else:
+                if not task_id in self.task_local_steps:
+                    return
+            start_pos, kv_cache_dict = self.task_info[(task_id, step)]
+
+            # first node
+            if index == 0:
+                bsz = len(payload)
+                if is_new_task:
+                    min_prompt_len = min(len(t) for t in payload)
+                    self.task_prompt_tokens[task_id] = payload
+                    tokens = torch.zeros((bsz, min_prompt_len), dtype=torch.long)
+                    for k, t in enumerate(payload):
+                        tokens[k, :] = torch.tensor(t[:min_prompt_len], dtype=torch.long)
+                    h = tokens.to(main_device)
+                else:
+                    prompt_tokens = self.task_prompt_tokens[task_id]
+                    tokens = torch.zeros((bsz, 1), dtype=torch.long)
+                    for k, t in enumerate(prompt_tokens):
+                        if len(t) > start_pos:
+                            tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long)
+                        else:
+                            tokens[k, :] = torch.tensor([payload[k]], dtype=torch.long)
+                    h = tokens.to(main_device)
+                # print(h)
+                bsz, seqlen = h.shape
+            else:
+                h = torch.tensor(payload, dtype=main_dtype, device=main_device)
+                if len(h.shape) > 2:
+                    bsz, seqlen, _ = h.shape
+                else:
+                    bsz, seqlen = h.shape
+
+            # last node init
+            if index == len(plan)-1 and is_new_task:
+                self.task_eos_reached[task_id] = torch.tensor([False] * bsz)
+                self.task_update_queue[task_id] = queue.Queue()
+                executor.submit(self.send_update_task, task_manager_url, task_id, step)
+
+            # forward
+            _, layer_names = plan[index]
+            self.preload_layers(layer_names)  # preload
+            if len(plan) == 1:
+                delta_round = 16
+                eos_reached = self.task_eos_reached[task_id].to(main_device)
+                prompt_tokens = self.task_prompt_tokens[task_id]
+                h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
+                                                                               kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
+                self.task_eos_reached[task_id] = eos_reached.to("cpu")
+                delta_round = len(tokens)+1
+                round = round+delta_round-1
+                start_pos = start_pos+delta_round-1
+            else:
+                h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict)
+            if h is None:
+                return
+            else:
+                self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
+
+            # last node
+            if index == len(plan)-1:
+                if temperature > 0:
+                    probs = torch.softmax(h[:, -1] / temperature, dim=-1)
+                    next_token = sample_top_p(probs, top_p)
+                else:
+                    next_token = torch.argmax(h[:, -1], dim=-1)
+                next_token = next_token.reshape(-1)
+                if start_pos > max_total_len:
+                    next_token = torch.tensor([EOS_ID] * bsz)  # FIXME fake max length limit
+                # print(next_token)
+                next_token = next_token.to("cpu")
+
+                # eos_reached
+                self.task_eos_reached[task_id] |= torch.isin(next_token, stop_tokens_cpu)  # eos_id
+                if not all(self.task_eos_reached[task_id]):
+                    # next node
+                    self.send_forward(
+                        plan[0][0],
+                        data={
+                            "task_id": task_id,
+                            "plan": plan,
+                            "step": 0,
+                            "round": round+1,
+                            "payload": next_token.tolist(),
+                            "max_total_len": max_total_len,
+                            "temperature": temperature,
+                            "top_p": top_p,
+                            "task_manager_url": task_manager_url,
+                            "signature": signature,
+                            "timestamp": timestamp,
+                        })
+                else:
+                    self.send_forward(
+                        plan[0][0],
+                        data={
+                            "task_id": task_id,
+                            "plan": plan,
+                            "step": 0,
+                            "task_manager_url": task_manager_url,
+                            "signature": signature,
+                            "timestamp": timestamp,
+                        })
+                # update
+                if task_manager_url is not None:
+                    self.new_task_update(task_manager_url, task_id, step, round, next_token.tolist())
+                if all(self.task_eos_reached[task_id]):
+                    self.cancel_task(task_id, True)
+            else:
                 # next node
                 self.send_forward(
                     plan[index+1][0],
@@ -589,102 +719,8 @@ class Worker:
                         "task_id": task_id,
                         "plan": plan,
                         "step": step+1,
-                        "task_manager_url": task_manager_url,
-                        "signature": signature,
-                        "timestamp": timestamp,
-                    })
-            return
-
-        if is_new_task:
-            if task_id in self.task_local_steps:
-                self.task_local_steps[task_id].append(step)
-            else:
-                self.task_local_steps[task_id] = [step]
-            self.task_info[(task_id, step)] = (0, dict())
-        else:
-            if not task_id in self.task_local_steps:
-                return
-        start_pos, kv_cache_dict = self.task_info[(task_id, step)]
-
-        # first node
-        if index == 0:
-            bsz = len(payload)
-            if is_new_task:
-                min_prompt_len = min(len(t) for t in payload)
-                self.task_prompt_tokens[task_id] = payload
-                tokens = torch.zeros((bsz, min_prompt_len), dtype=torch.long)
-                for k, t in enumerate(payload):
-                    tokens[k, :] = torch.tensor(t[:min_prompt_len], dtype=torch.long)
-                h = tokens.to(main_device)
-            else:
-                prompt_tokens = self.task_prompt_tokens[task_id]
-                tokens = torch.zeros((bsz, 1), dtype=torch.long)
-                for k, t in enumerate(prompt_tokens):
-                    if len(t) > start_pos:
-                        tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long)
-                    else:
-                        tokens[k, :] = torch.tensor([payload[k]], dtype=torch.long)
-                h = tokens.to(main_device)
-            # print(h)
-            bsz, seqlen = h.shape
-        else:
-            h = torch.tensor(payload, dtype=main_dtype, device=main_device)
-            if len(h.shape) > 2:
-                bsz, seqlen, _ = h.shape
-            else:
-                bsz, seqlen = h.shape
-
-        # last node init
-        if index == len(plan)-1 and is_new_task:
-            self.task_eos_reached[task_id] = torch.tensor([False] * bsz)
-            self.task_update_queue[task_id] = queue.Queue()
-            executor.submit(self.send_update_task, task_manager_url, task_id, step)
-
-        # forward
-        _, layer_names = plan[index]
-        self.preload_layers(layer_names)  # preload
-        if len(plan) == 1:
-            delta_round = 16
-            eos_reached = self.task_eos_reached[task_id].to(main_device)
-            prompt_tokens = self.task_prompt_tokens[task_id]
-            h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
-                                                                           kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
-            self.task_eos_reached[task_id] = eos_reached.to("cpu")
-            delta_round = len(tokens)+1
-            round = round+delta_round-1
-            start_pos = start_pos+delta_round-1
-        else:
-            h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict)
-        if h is None:
-            return
-        else:
-            self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
-
-        # last node
-        if index == len(plan)-1:
-            if temperature > 0:
-                probs = torch.softmax(h[:, -1] / temperature, dim=-1)
-                next_token = sample_top_p(probs, top_p)
-            else:
-                next_token = torch.argmax(h[:, -1], dim=-1)
-            next_token = next_token.reshape(-1)
-            if start_pos > max_total_len:
-                next_token = torch.tensor([EOS_ID] * bsz)  # FIXME fake max length limit
-            # print(next_token)
-            next_token = next_token.to("cpu")
-
-            # eos_reached
-            self.task_eos_reached[task_id] |= torch.isin(next_token, stop_tokens_cpu)  # eos_id
-            if not all(self.task_eos_reached[task_id]):
-                # next node
-                self.send_forward(
-                    plan[0][0],
-                    data={
-                        "task_id": task_id,
-                        "plan": plan,
-                        "step": 0,
-                        "round": round+1,
-                        "payload": next_token.tolist(),
+                        "round": round,
+                        "payload": h.tolist(),
                         "max_total_len": max_total_len,
                         "temperature": temperature,
                         "top_p": top_p,
@@ -692,50 +728,19 @@ class Worker:
                         "signature": signature,
                         "timestamp": timestamp,
                     })
-            else:
-                self.send_forward(
-                    plan[0][0],
-                    data={
-                        "task_id": task_id,
-                        "plan": plan,
-                        "step": 0,
-                        "task_manager_url": task_manager_url,
-                        "signature": signature,
-                        "timestamp": timestamp,
-                    })
-            # update
-            if task_manager_url is not None:
-                self.new_task_update(task_manager_url, task_id, step, round, next_token.tolist())
-                if all(self.task_eos_reached[task_id]):
-                    self.cancel_task(task_id)
-        else:
-            # next node
-            self.send_forward(
-                plan[index+1][0],
-                data={
-                    "task_id": task_id,
-                    "plan": plan,
-                    "step": step+1,
-                    "round": round,
-                    "payload": h.tolist(),
-                    "max_total_len": max_total_len,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "task_manager_url": task_manager_url,
-                    "signature": signature,
-                    "timestamp": timestamp,
-                })
-            # update
-            # if task_manager_url is not None:
-            #     send_request(
-            #         f"{task_manager_url}/update_task",
-            #         headers={"worker-id": self.worker_id, "api-token": self.api_token},
-            #         json={
-            #             "task_id": task_id,
-            #             "plan_current_step": step,
-            #             "plan_current_round": round,
-            #         },
-            #         worker=self)
+                # update
+                # if task_manager_url is not None:
+                #     send_request(
+                #         f"{task_manager_url}/update_task",
+                #         headers={"worker-id": self.worker_id, "api-token": self.api_token},
+                #         json={
+                #             "task_id": task_id,
+                #             "plan_current_step": step,
+                #             "plan_current_round": round,
+                #         },
+                #         worker=self)
+        except Exception:
+            print(traceback.format_exc())
 
     def get_info(self, node_list, timeout):
         gpu_mem_info = torch.cuda.mem_get_info()
