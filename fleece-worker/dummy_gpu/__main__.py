@@ -34,16 +34,17 @@ class DummyGPU:
         self.curr_mem -= mem_usage
         return
     
-    def forward(self, layer_name, add_cache_layer = 0):
+    def forward(self, layer_name):
         forward_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Latency_with_cache'].iloc[0]
-        if add_cache_layer:
-            mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_inference_slope'].iloc[0]
-            mem_usage *= add_cache_layer
-            if self.curr_mem + mem_usage > self.total_mem:
-                raise Exception('Out of Memory in Forward')
-            self.curr_mem += mem_usage
         time.sleep(forward_time)
         return
+
+    def add_cache(self, layer_name, num_cache_layer):
+        mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_inference_slope'].iloc[0]
+        mem_usage *= num_cache_layer
+        if self.curr_mem + mem_usage > self.total_mem:
+            raise Exception('Out of Memory in Forward')
+        self.curr_mem += mem_usage
 
     def available_mem(self):
         return self.total_mem - self.curr_mem
