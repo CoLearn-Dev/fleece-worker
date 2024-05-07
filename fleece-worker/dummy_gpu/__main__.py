@@ -33,11 +33,13 @@ class DummyGPU:
         return
     
     def unload(self, layer_name):
+        layer_name = layer_name.split('.')[0]
         mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_model'].iloc[0]
         self.curr_mem -= mem_usage
         return
     
     def forward(self, layer_name):
+        layer_name = layer_name.split('.')[0]
         forward_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Latency_with_cache'].iloc[0]
         time.sleep(forward_time/1000)
         return
