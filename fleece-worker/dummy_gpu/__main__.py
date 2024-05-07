@@ -1,10 +1,12 @@
 import pandas as pd
 import time
 from uuid import uuid4
+import os
 
 
 class DataPlane:
-    def __init__(self, path='./fleece-worker/dummy_gpu'):
+    def __init__(self):
+        path = os.path.dirname(__file__)
         self.gpu_data = pd.read_csv(f'{path}/gpu.csv')
         self.mem_data = pd.read_csv(f'{path}/mem.csv')
         self.time_data = pd.read_csv(f'{path}/time.csv')
@@ -12,7 +14,7 @@ class DataPlane:
     def get_total_mem(self, device) -> int:
         if device not in self.gpu_data['Machine'].values:
             raise ValueError(f'GPU {device} not Support')
-        return self.gpu_data[self.gpu_data['Machine'] == device]['Memory'].iloc[0]
+        return int(self.gpu_data[self.gpu_data['Machine'] == device]['Memory'].iloc[0])
 
 
 class DummyGPU:
@@ -28,7 +30,7 @@ class DummyGPU:
     def load(self, layer_name):
         layer_name = layer_name.split('.')[0]
         loading_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Loading_time'].iloc[0]
-        mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_model'].iloc[0]
+        mem_usage = int(DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_model'].iloc[0])
         if self.curr_mem + mem_usage > self.total_mem:
             raise Exception('Out of Memory in Loading')
         self.curr_mem += mem_usage
@@ -37,13 +39,13 @@ class DummyGPU:
 
     def unload(self, layer_name):
         layer_name = layer_name.split('.')[0]
-        mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_model'].iloc[0]
+        mem_usage = int(DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_model'].iloc[0])
         self.curr_mem -= mem_usage
         return
 
     def forward(self, layer_name):
         layer_name = layer_name.split('.')[0]
-        forward_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Latency_with_cache'].iloc[0]
+        forward_time = int(DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Latency_with_cache'].iloc[0])
         time.sleep(forward_time/1000)
         return
 

@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 import queue
 import traceback
+from .dummy_gpu.__main__ import DummyGPU
 
 torch.set_default_device("cpu")
 
@@ -211,7 +212,7 @@ class Worker:
         self.peer: Optional[Peer] = None
         self.async_portal = None
 
-        self.dummy_gpu = None
+        self.dummy_gpu:DummyGPU = None
 
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
@@ -705,6 +706,8 @@ class Worker:
     #     return self.worker_nickname, gpu_mem_info, latency_list
 
     def send_heartbeat(self):
+        if self.dummy_gpu is None:
+            return
         info_data = {
             "loaded_layers": json.dumps(list(self.layers.keys())),
             "perf_computation": [],
@@ -736,7 +739,7 @@ class Worker:
         # if torch.cuda.is_available():
             # memory = torch.cuda.mem_get_info()
         memory = self.dummy_gpu.available_mem()
-        info_data["gpu_remaining_memory"] = memory[0]
+        info_data["gpu_remaining_memory"] = memory
         data = {"info_update": json.dumps(info_data)}
         try:
             r = requests.post(f"{self.controller_url}/worker_heartbeat",

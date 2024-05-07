@@ -1,1 +1,1 @@
-CUDA_VISIBLE_DEVICES=0 python -m fleece-worker -c https://serving-api.colearn.cloud:8443 -t 6d9240caf52e1ba61237245650e28f5f --worker-nickname dummy --heartbeat-interval 1
+python -m fleece-worker -c https://serving-api.colearn.cloud:8443 -t 6d9240caf52e1ba61237245650e28f5f --worker-nickname dummy --heartbeat-interval 10 --gpu-spec A10G
