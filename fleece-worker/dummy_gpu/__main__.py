@@ -1,5 +1,6 @@
 import pandas as pd
 import time
+from uuid import uuid4
 
 class DataPlane:
     def __init__(self, path = './fleece-worker/dummy_gpu'):
@@ -19,6 +20,7 @@ class DummyGPU:
         self.device = device
         self.total_mem = DummyGPU.data_plane.get_total_mem(device)
         self.curr_mem = 0
+        self.tensor_map = {}
 
     def load(self, layer_name):
         loading_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Loading_time'].iloc[0]
@@ -39,12 +41,23 @@ class DummyGPU:
         time.sleep(forward_time)
         return
 
-    def add_cache(self, layer_name, num_cache_layer):
-        mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_inference_slope'].iloc[0]
-        mem_usage *= num_cache_layer
-        if self.curr_mem + mem_usage > self.total_mem:
-            raise Exception('Out of Memory in Forward')
-        self.curr_mem += mem_usage
+    def create_tensor(self, shape, dtype_size = 16) -> str:
+        tensor_id = str(uuid4())
+        size = dtype_size
+        for dim in shape:
+            size *= dim
+        if self.curr_mem + size > self.total_mem:
+            raise Exception('Out of Memory in Tensor Creation')
+        self.curr_mem += size
+        self.tensor_map[tensor_id] = size
+        return tensor_id
+
+    def del_tensor(self, tensor_id: str):
+        if tensor_id not in self.tensor_map:
+            raise Exception('Tensor not found')
+        self.curr_mem -= self.tensor_map[tensor_id]
+        del self.tensor_map[tensor_id]
+        return
 
     def available_mem(self):
         return self.total_mem - self.curr_mem
