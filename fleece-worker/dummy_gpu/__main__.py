@@ -2,8 +2,9 @@ import pandas as pd
 import time
 from uuid import uuid4
 
+
 class DataPlane:
-    def __init__(self, path = './fleece-worker/dummy_gpu'):
+    def __init__(self, path='./fleece-worker/dummy_gpu'):
         self.gpu_data = pd.read_csv(f'{path}/gpu.csv')
         self.mem_data = pd.read_csv(f'{path}/mem.csv')
         self.time_data = pd.read_csv(f'{path}/time.csv')
@@ -13,9 +14,11 @@ class DataPlane:
             raise ValueError(f'GPU {device} not Support')
         return self.gpu_data[self.gpu_data['Machine'] == device]['Memory'].iloc[0]
 
+
 class DummyGPU:
 
     data_plane = DataPlane()
+
     def __init__(self, device):
         self.device = device
         self.total_mem = DummyGPU.data_plane.get_total_mem(device)
@@ -31,20 +34,20 @@ class DummyGPU:
         self.curr_mem += mem_usage
         time.sleep(loading_time/1000)
         return
-    
+
     def unload(self, layer_name):
         layer_name = layer_name.split('.')[0]
         mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_model'].iloc[0]
         self.curr_mem -= mem_usage
         return
-    
+
     def forward(self, layer_name):
         layer_name = layer_name.split('.')[0]
         forward_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Latency_with_cache'].iloc[0]
         time.sleep(forward_time/1000)
         return
 
-    def create_tensor(self, shape, dtype_size = 16) -> str:
+    def create_tensor(self, shape, dtype_size=16):
         tensor_id = str(uuid4())
         size = dtype_size
         for dim in shape:
@@ -53,9 +56,10 @@ class DummyGPU:
             raise Exception('Out of Memory in Tensor Creation')
         self.curr_mem += size
         self.tensor_map[tensor_id] = size
-        return tensor_id
+        return (tensor_id, shape)
 
-    def del_tensor(self, tensor_id: str):
+    def del_tensor(self, tensor):
+        tensor_id = tensor[0]
         if tensor_id not in self.tensor_map:
             raise Exception('Tensor not found')
         self.curr_mem -= self.tensor_map[tensor_id]
@@ -64,6 +68,7 @@ class DummyGPU:
 
     def available_mem(self):
         return self.total_mem - self.curr_mem
+
 
 if __name__ == '__main__':
     a100 = DummyGPU('A100')
@@ -80,4 +85,3 @@ if __name__ == '__main__':
     a100.forward('llama-2-7b-chat-slice/layers')
     print(a100.curr_mem)
     print(time.time() - t)
-

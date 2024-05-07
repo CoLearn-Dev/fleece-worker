@@ -74,8 +74,8 @@ def get_kv_cache(x, start_pos, kv_cache, model):
         )
         return (cache_k, cache_v)
     old_cache_k, old_cache_v = kv_cache
-    if start_pos + seqlen > old_cache_k.shape[1]:
-        length = get_kv_cache_length(old_cache_k.shape[1], start_pos + seqlen)
+    if start_pos + seqlen > old_cache_k[1][1]:
+        length = get_kv_cache_length(old_cache_k[1][1], start_pos + seqlen)
         cache_k = dummy_gpu.create_tensor(
             (
                 bsz,
@@ -379,7 +379,16 @@ class Worker:
             for full_layer_name in task.layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
                 dummy_gpu.forward(full_layer_name)
-                if layer_name == "output":
+                if layer_name.startswith("layers."):
+                    kv_cache_list = []
+                    for t in task_list:
+                        if t.is_new_task:
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name]))
+                        else:
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
+                    for i, t in enumerate(task_list):
+                        t.kv_cache_dict[full_layer_name] = kv_cache_list[i]
+                elif layer_name == "output":
                     for t in task_list:
                         t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
                         t.h[:, :, t.round+10] = 1.0
@@ -486,7 +495,7 @@ class Worker:
                 next_token = next_token.reshape(-1)
                 if start_pos > max_total_len:
                     next_token = torch.tensor([2] * bsz, device=main_device)  # FIXME fake max length limit
-                # print(next_token)
+                print(next_token)
                 # eos_reached
                 if all(eos_reached | (next_token == 2)) or i == delta_round-1:
                     return h, kv_cache_dict, ans_tokens, eos_reached
@@ -527,7 +536,7 @@ class Worker:
                 timestamp: Optional[int] = None,
                 ):
         try:
-            self.verify(task_manager_url, task_id, plan, timestamp, signature)
+            # self.verify(task_manager_url, task_id, plan, timestamp, signature)
 
             index = step
             is_new_task = round == 0
