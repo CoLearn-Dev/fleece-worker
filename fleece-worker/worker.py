@@ -494,7 +494,7 @@ class Worker:
                 next_token = next_token.reshape(-1)
                 if start_pos > max_total_len:
                     next_token = torch.tensor([2] * bsz, device=main_device)  # FIXME fake max length limit
-                print(next_token)
+                # print(next_token)
                 # eos_reached
                 if all(eos_reached | (next_token == 2)) or i == delta_round-1:
                     return h, kv_cache_dict, ans_tokens, eos_reached
@@ -535,7 +535,7 @@ class Worker:
                 timestamp: Optional[int] = None,
                 ):
         try:
-            # self.verify(task_manager_url, task_id, plan, timestamp, signature)
+            self.verify(task_manager_url, task_id, plan, timestamp, signature)
 
             index = step
             is_new_task = round == 0
