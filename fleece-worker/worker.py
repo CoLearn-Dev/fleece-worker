@@ -17,7 +17,7 @@ import queue
 import traceback
 from .dummy_gpu.__main__ import DummyGPU
 
-a100 = DummyGPU('A100')
+dummy_gpu = DummyGPU('A100')
 
 torch.set_default_device("cpu")
 
@@ -54,7 +54,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
     bsz, seqlen = x.shape[0], x.shape[1]
     if kv_cache is None:
         length = get_kv_cache_length(0, start_pos + seqlen)
-        cache_k = a100.create_tensor(
+        cache_k = dummy_gpu.create_tensor(
             (
                 bsz,
                 length,
@@ -63,7 +63,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
             ),
             dtype_size=16
         )
-        cache_v = a100.create_tensor(
+        cache_v = dummy_gpu.create_tensor(
             (
                 bsz,
                 length,
@@ -76,7 +76,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
     old_cache_k, old_cache_v = kv_cache
     if start_pos + seqlen > old_cache_k.shape[1]:
         length = get_kv_cache_length(old_cache_k.shape[1], start_pos + seqlen)
-        cache_k = a100.create_tensor(
+        cache_k = dummy_gpu.create_tensor(
             (
                 bsz,
                 length,
@@ -85,7 +85,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
             ),
             dtype_size=16
         )
-        cache_v = a100.create_tensor(
+        cache_v = dummy_gpu.create_tensor(
             (
                 bsz,
                 length,
@@ -104,7 +104,7 @@ def get_kv_cache(x, start_pos, kv_cache, model):
 
 
 def del_tensor(t):
-    a100.del_tensor(t)
+    dummy_gpu.del_tensor(t)
 
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=400)
@@ -274,7 +274,7 @@ class Worker:
                 # l.to(main_device)
                 n_local_kv_heads = model_args.n_heads if model_args.n_kv_heads is None else model_args.n_kv_heads
                 head_dim = model_args.dim // model_args.n_heads
-                a100.load(full_layer_name)
+                dummy_gpu.load(full_layer_name)
                 self.layers[full_layer_name] = {"n_local_kv_heads": n_local_kv_heads, "head_dim": head_dim}
 
     def unload_layers(self, layer_names: List[str]):
@@ -282,7 +282,7 @@ class Worker:
             if full_layer_name not in self.layers:
                 continue  # TODO continue or warning?
             # del self.layers[full_layer_name]
-            a100.unload(full_layer_name)
+            dummy_gpu.unload(full_layer_name)
             # torch.cuda.empty_cache()
 
     def cancel_task(self, task_id: str):
@@ -378,7 +378,7 @@ class Worker:
             bsz_list, start_pos_list = [t.bsz for t in task_list], [t.start_pos for t in task_list]
             for full_layer_name in task.layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
-                a100.forward(full_layer_name)
+                dummy_gpu.forward(full_layer_name)
                 if layer_name == "output":
                     for t in task_list:
                         t.h = torch.zeros((t.bsz, 1, 32000), dtype=main_dtype, device=main_device)
@@ -406,19 +406,19 @@ class Worker:
             task = q.get()
             total_bsz = task.bsz
             task_list.append(task)
-            while True:
-                try:
-                    task2 = q.get(block=False)
-                    if task2.seqlen == task.seqlen and task2.layer_names == task.layer_names:
-                        task_list.append(task2)
-                        total_bsz += task2.bsz
-                        if total_bsz >= 16:
-                            break
-                    else:
-                        q.put(task2)
-                        break
-                except queue.Empty:
-                    break
+            # while True:
+            #     try:
+            #         task2 = q.get(block=False)
+            #         if task2.seqlen == task.seqlen and task2.layer_names == task.layer_names:
+            #             task_list.append(task2)
+            #             total_bsz += task2.bsz
+            #             if total_bsz >= 16:
+            #                 break
+            #         else:
+            #             q.put(task2)
+            #             break
+            #     except queue.Empty:
+            #         break
             # print("layer_forward_engine_step: ", len(task_list))
             self.layer_forward_engine_step(task_list)
 
@@ -727,7 +727,7 @@ class Worker:
 
         # if torch.cuda.is_available():
             # memory = torch.cuda.mem_get_info()
-        memory = a100.available_mem()
+        memory = dummy_gpu.available_mem()
         info_data["gpu_remaining_memory"] = memory[0]
         data = {"info_update": json.dumps(info_data)}
         try:
