@@ -1,0 +1,9 @@
+Layer,From_model,Mem_model,Mem_inference_slope
+llama-2-7b-chat-slice/tok_embeddings,llama-2-7b-chat-slice,262144000,0
+llama-2-7b-chat-slice/layers,llama-2-7b-chat-slice,404750336,8192
+llama-2-7b-chat-slice/norm,llama-2-7b-chat-slice,8866,0
+llama-2-7b-chat-slice/output,llama-2-7b-chat-slice,262144000,0
+llama-2-70b-chat-slice/tok_embeddings,llama-2-70b-chat-slice,524288000,0
+llama-2-70b-chat-slice/layers,llama-2-70b-chat-slice,1711276032,2048
+llama-2-70b-chat-slice/norm,llama-2-70b-chat-slice,17058,0
+llama-2-70b-chat-slice/output,llama-2-70b-chat-slice,524288000,0

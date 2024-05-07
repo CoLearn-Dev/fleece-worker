@@ -152,7 +152,8 @@ async def main() -> None:
         )
 
         servers = json.loads(r.content)
-        signaling = servers["signaling"]["url"]
+        # signaling = servers["signaling"]["url"]
+        signaling = "ws://gpublaze.ist.berkeley.edu:8766"
         turns = servers["turn"]
         async with BlockingPortal() as portal:
             worker.async_portal = portal

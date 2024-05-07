@@ -1,0 +1,9 @@
+llama_2_7b_args = {"dim": 4096, "multiple_of": 256, "n_heads": 32, "n_layers": 32, "norm_eps": 1e-06, "vocab_size": 32000}
+llama_2_13b_args = {"dim": 5120, "multiple_of": 256, "n_heads": 40, "n_layers": 40, "norm_eps": 1e-05, "vocab_size": 32000}
+llama_2_70b_args = {"dim": 8192, "multiple_of": 4096, "ffn_dim_multiplier": 1.3, "n_heads": 64, "n_kv_heads": 8, "n_layers": 80, "norm_eps": 1e-05, "vocab_size": 32000}
+(bsz,length,n_local_kv_heads,head_dim)
+n_local_kv_heads=args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+head_dim=dim/n_heads
+
+2*(1*1*32*(4096/32))=8192
+2*(1*1*8*(8192/64))=2048
