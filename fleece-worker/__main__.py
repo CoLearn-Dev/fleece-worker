@@ -12,6 +12,7 @@ import json
 import torch
 import concurrent.futures
 from anyio.from_thread import BlockingPortal
+from .dummy_gpu.__main__ import DummyGPU
 
 app = FastAPI()
 worker = Worker()
@@ -100,7 +101,9 @@ async def main() -> None:
     parser.add_argument("--port")
     parser.add_argument("--worker-nickname")
     parser.add_argument("--heartbeat-interval")
+    parser.add_argument("--gpu-spec")
     args = parser.parse_args()
+    worker.dummy_gpu = DummyGPU(args.gpu_spec)
     if args.worker_url is not None:
         worker_url = args.worker_url
         parsed = worker_url.split(':')

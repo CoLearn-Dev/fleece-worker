@@ -15,9 +15,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
 import queue
 import traceback
-from .dummy_gpu.__main__ import DummyGPU
-
-dummy_gpu = DummyGPU('A100')
 
 torch.set_default_device("cpu")
 
@@ -50,7 +47,7 @@ def get_kv_cache_length(cur, seqlen):
     return cur
 
 
-def get_kv_cache(x, start_pos, kv_cache, model):
+def get_kv_cache(x, start_pos, kv_cache, model, dummy_gpu):
     bsz, seqlen = x.shape[0], x.shape[1]
     if kv_cache is None:
         length = get_kv_cache_length(0, start_pos + seqlen)
@@ -95,15 +92,15 @@ def get_kv_cache(x, start_pos, kv_cache, model):
             dtype_size=16
         )
         # cache_k[:, :start_pos, :, :], cache_v[:, :start_pos, :, :] = old_cache_k[:, :start_pos, :, :], old_cache_v[:, :start_pos, :, :]
-        del_tensor(old_cache_k)
-        del_tensor(old_cache_v)
+        del_tensor(old_cache_k, dummy_gpu)
+        del_tensor(old_cache_v, dummy_gpu)
         del kv_cache
         return (cache_k, cache_v)
     else:
         return kv_cache
 
 
-def del_tensor(t):
+def del_tensor(t, dummy_gpu):
     dummy_gpu.del_tensor(t)
 
 
@@ -214,6 +211,8 @@ class Worker:
         self.peer: Optional[Peer] = None
         self.async_portal = None
 
+        self.dummy_gpu = None
+
         self.cache_dir = os.path.expanduser(cache_dir)
         self.layers = dict()
         self.task_info: Dict[(str, int), Tuple[int, Dict[str, Any]]] = dict()
@@ -274,7 +273,7 @@ class Worker:
                 # l.to(main_device)
                 n_local_kv_heads = model_args.n_heads if model_args.n_kv_heads is None else model_args.n_kv_heads
                 head_dim = model_args.dim // model_args.n_heads
-                dummy_gpu.load(full_layer_name)
+                self.dummy_gpu.load(full_layer_name)
                 self.layers[full_layer_name] = {"n_local_kv_heads": n_local_kv_heads, "head_dim": head_dim}
 
     def unload_layers(self, layer_names: List[str]):
@@ -282,7 +281,7 @@ class Worker:
             if full_layer_name not in self.layers:
                 continue  # TODO continue or warning?
             # del self.layers[full_layer_name]
-            dummy_gpu.unload(full_layer_name)
+            self.dummy_gpu.unload(full_layer_name)
             # torch.cuda.empty_cache()
 
     def cancel_task(self, task_id: str):
@@ -303,8 +302,8 @@ class Worker:
             _, kv_cache_dict = self.task_info[(task_id, step)]
             for _, kv_cache in kv_cache_dict.items():
                 k_cache, v_cache = kv_cache
-                del_tensor(k_cache)
-                del_tensor(v_cache)
+                del_tensor(k_cache, self.dummy_gpu)
+                del_tensor(v_cache, self.dummy_gpu)
             del self.task_info[(task_id, step)]
         # torch.cuda.empty_cache()
 
@@ -378,14 +377,14 @@ class Worker:
             bsz_list, start_pos_list = [t.bsz for t in task_list], [t.start_pos for t in task_list]
             for full_layer_name in task.layer_names:
                 model_name, layer_name = parse_layer_name(full_layer_name)
-                dummy_gpu.forward(full_layer_name)
+                self.dummy_gpu.forward(full_layer_name)
                 if layer_name.startswith("layers."):
                     kv_cache_list = []
                     for t in task_list:
                         if t.is_new_task:
-                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name]))
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name], self.dummy_gpu))
                         else:
-                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
+                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name], self.dummy_gpu))
                     for i, t in enumerate(task_list):
                         t.kv_cache_dict[full_layer_name] = kv_cache_list[i]
                 elif layer_name == "output":
@@ -736,7 +735,7 @@ class Worker:
 
         # if torch.cuda.is_available():
             # memory = torch.cuda.mem_get_info()
-        memory = dummy_gpu.available_mem()
+        memory = self.dummy_gpu.available_mem()
         info_data["gpu_remaining_memory"] = memory[0]
         data = {"info_update": json.dumps(info_data)}
         try:
