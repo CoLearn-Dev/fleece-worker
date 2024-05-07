@@ -23,12 +23,13 @@ class DummyGPU:
         self.tensor_map = {}
 
     def load(self, layer_name):
+        layer_name = layer_name.split('.')[0]
         loading_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Loading_time'].iloc[0]
         mem_usage = DummyGPU.data_plane.mem_data[DummyGPU.data_plane.mem_data['Layer'] == layer_name]['Mem_model'].iloc[0]
         if self.curr_mem + mem_usage > self.total_mem:
             raise Exception('Out of Memory in Loading')
         self.curr_mem += mem_usage
-        time.sleep(loading_time)
+        time.sleep(loading_time/1000)
         return
     
     def unload(self, layer_name):
@@ -38,7 +39,7 @@ class DummyGPU:
     
     def forward(self, layer_name):
         forward_time = DummyGPU.data_plane.time_data[(DummyGPU.data_plane.time_data['Spec'] == self.device) & (DummyGPU.data_plane.time_data['Layer'] == layer_name)]['Latency_with_cache'].iloc[0]
-        time.sleep(forward_time)
+        time.sleep(forward_time/1000)
         return
 
     def create_tensor(self, shape, dtype_size = 16) -> str:
