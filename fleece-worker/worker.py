@@ -1,9 +1,9 @@
 from typing import List, Optional, Tuple, Dict, Any, Set
 import os
 import torch
-from torch import nn
+from torch import Tensor, nn
 from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
-from fleece_network import Peer
+from fleece_network import Peer, dumps
 import requests
 import threading
 import concurrent.futures
@@ -140,11 +140,11 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=400)
 executor_forward = concurrent.futures.ThreadPoolExecutor(max_workers=40)
 
 
-def requests_post(url, headers=None, json=None, worker=None, to_worker_id=None):
+def requests_post(url, headers=None, data=None, json=None, worker=None, to_worker_id=None):
     try:
         if to_worker_id is not None:
             st = time.monotonic()
-        r = requests.post(url, headers=headers, json=json)
+        r = requests.post(url, headers=headers, data=data, json=json)
         assert r.status_code == 200
         if to_worker_id is not None:
             en = time.monotonic()
@@ -155,11 +155,11 @@ def requests_post(url, headers=None, json=None, worker=None, to_worker_id=None):
             worker.cancel_task(json["task_id"])
 
 
-def send_request(url, headers=None, json=None, exec=None, worker=None, to_worker_id=None):
+def send_request(url, headers=None, data=None, exec=None, worker=None, to_worker_id=None):
     if exec is None:
-        executor.submit(requests_post, url, headers, json, worker, to_worker_id)
+        executor.submit(requests_post, url=url, headers=headers, data=data, worker=worker, to_worker_id=to_worker_id)
     else:
-        exec.submit(requests_post, url, headers, json, worker, to_worker_id)
+        exec.submit(requests_post, url=url, headers=headers, data=data, worker=worker, to_worker_id=to_worker_id)
 
 
 executor_latency_test = concurrent.futures.ThreadPoolExecutor(max_workers=40)
@@ -370,33 +370,34 @@ class Worker:
         except:
             return False
 
-    def send_forward(self, to_worker_id, data):
+    def send_forward(self, to_worker_id, tensors: dict[str, Tensor], metadata: dict[str, Any]):
         if to_worker_id == self.worker_id:
-            executor.submit(self.forward, **data)
+            executor.submit(self.forward, **tensors, **metadata)
             return
         url = self.get_worker_url(to_worker_id)
+        buffer = dumps(tensors, metadata)
         if (url is not None and url != "none") and to_worker_id != self.worker_id:
             if to_worker_id == self.worker_id:
                 # self.forward(**data)
                 send_request(
                     f"http://127.0.0.1:{self.port}/forward",
-                    json=data,
+                    data=buffer,
                     exec=executor_forward,
                     worker=self,
                     to_worker_id=to_worker_id)
             else:
                 send_request(
                     f"{self.get_worker_url(to_worker_id)}/forward",
-                    json=data,
+                    data=buffer,
                     exec=executor_forward,
                     worker=self,
                     to_worker_id=to_worker_id)
         else:
             async def send():
                 connection = await self.peer.connect(to_worker_id)
-                reply = await connection.send("forward", data)
+                reply = await connection.send("forward", buffer)
                 if reply.status_code != 200:
-                    self.cancel_task(data["task_id"])
+                    self.cancel_task(metadata["task_id"])
             self.async_portal.call(self.peer.tg.start_soon, send)
 
     def layer_forward_engine_step(self, task_list: List[LayerForward]):
@@ -588,7 +589,7 @@ class Worker:
                     # next node
                     self.send_forward(
                         plan[index+1][0],
-                        data={
+                        metadata={
                             "task_id": task_id,
                             "plan": plan,
                             "step": step+1,
@@ -682,12 +683,14 @@ class Worker:
                     # next node
                     self.send_forward(
                         plan[0][0],
-                        data={
+                        tensors={
+                            "payload": next_token,    
+                        },
+                        metadata={
                             "task_id": task_id,
                             "plan": plan,
                             "step": 0,
                             "round": round+1,
-                            "payload": next_token.tolist(),
                             "max_total_len": max_total_len,
                             "temperature": temperature,
                             "top_p": top_p,
@@ -698,7 +701,8 @@ class Worker:
                 else:
                     self.send_forward(
                         plan[0][0],
-                        data={
+                        tensors={},
+                        metadata={
                             "task_id": task_id,
                             "plan": plan,
                             "step": 0,
@@ -715,12 +719,14 @@ class Worker:
                 # next node
                 self.send_forward(
                     plan[index+1][0],
-                    data={
+                    tensors={
+                        "payload": h,
+                    },
+                    metadata={
                         "task_id": task_id,
                         "plan": plan,
                         "step": step+1,
                         "round": round,
-                        "payload": h.tolist(),
                         "max_total_len": max_total_len,
                         "temperature": temperature,
                         "top_p": top_p,

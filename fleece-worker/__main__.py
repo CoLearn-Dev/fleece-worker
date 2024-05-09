@@ -1,6 +1,6 @@
 from typing import List, Tuple, Optional
-from fastapi import FastAPI, HTTPException
-from fleece_network import Peer
+from fastapi import FastAPI, HTTPException, Request
+from fleece_network import Peer, loads
 from pydantic import BaseModel
 import anyio
 import uvicorn
@@ -56,15 +56,32 @@ class ForwardRequest(BaseModel):
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=64)
 
 
-def forward(req: ForwardRequest):
+def forward(req: bytes):
     try:
-        executor.submit(worker.forward, req.task_id, req.plan, req.step, req.round, req.payload, req.max_total_len, req.temperature, req.top_p,
-                        req.task_manager_url, req.signature, req.timestamp)
+        tensors, metadata = loads(req)
+        executor.submit(
+            worker.forward, 
+            **tensors, 
+            **metadata,
+        )
         return None
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+async def app_forward(request: Request):
+    buffer = await request.body()
+    try:
+        tensors, metadata = loads(buffer)
+        executor.submit(
+            worker.forward, 
+            **tensors, 
+            **metadata,
+        )
+        return None
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 class GetInfoRequest(BaseModel):
     node_list: List[str] = []
@@ -174,7 +191,7 @@ async def main() -> None:
                 if worker_url != "none":
                     app.add_api_route("/preload_layers", preload_layers, methods=["POST"])
                     app.add_api_route("/unload_layers", unload_layers, methods=["POST"])
-                    app.add_api_route("/forward", forward, methods=["POST"])
+                    app.add_api_route("/forward", app_forward, methods=["POST"])
                     app.add_api_route("/get_info", get_info, methods=["POST"])
 
                     uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=False)
@@ -188,7 +205,7 @@ async def main() -> None:
             if worker_url != "none":
                 app.add_api_route("/preload_layers", preload_layers, methods=["POST"])
                 app.add_api_route("/unload_layers", unload_layers, methods=["POST"])
-                app.add_api_route("/forward", forward, methods=["POST"])
+                app.add_api_route("/forward", app_forward, methods=["POST"])
                 app.add_api_route("/get_info", get_info, methods=["POST"])
 
                 uviconfig = uvicorn.Config(app, host="0.0.0.0", port=port, access_log=True)
