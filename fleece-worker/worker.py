@@ -589,6 +589,7 @@ class Worker:
                     # next node
                     self.send_forward(
                         plan[index+1][0],
+                        tensors={},
                         metadata={
                             "task_id": task_id,
                             "plan": plan,
@@ -684,7 +685,7 @@ class Worker:
                     self.send_forward(
                         plan[0][0],
                         tensors={
-                            "payload": next_token,    
+                            "payload": next_token,
                         },
                         metadata={
                             "task_id": task_id,
