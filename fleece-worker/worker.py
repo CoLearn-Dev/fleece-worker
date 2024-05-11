@@ -633,7 +633,7 @@ class Worker:
                 # print(h)
                 bsz, seqlen = h.shape
             else:
-                h = torch.tensor(payload, dtype=main_dtype, device=main_device)
+                h = payload.to(main_dtype).to(main_device)  # h = torch.tensor(payload, dtype=main_dtype, device=main_device)
                 if len(h.shape) > 2:
                     bsz, seqlen, _ = h.shape
                 else:

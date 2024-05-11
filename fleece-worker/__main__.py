@@ -60,8 +60,8 @@ def forward(req: bytes):
     try:
         tensors, metadata = loads(req)
         executor.submit(
-            worker.forward, 
-            **tensors, 
+            worker.forward,
+            **tensors,
             **metadata,
         )
         return None
@@ -69,19 +69,21 @@ def forward(req: bytes):
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+
 async def app_forward(request: Request):
     buffer = await request.body()
     try:
         tensors, metadata = loads(buffer)
         executor.submit(
-            worker.forward, 
-            **tensors, 
+            worker.forward,
+            **tensors,
             **metadata,
         )
         return None
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
 
 class GetInfoRequest(BaseModel):
     node_list: List[str] = []
@@ -89,7 +91,7 @@ class GetInfoRequest(BaseModel):
 
 
 class GetInfoResponse(BaseModel):
-    worker_nickname: str
+    worker_nickname: Optional[str]
     gpu_mem_info: Tuple[int, int] = [0, 0]
     latency_list: List[Optional[float]] = []
 
