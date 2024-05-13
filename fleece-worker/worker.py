@@ -240,6 +240,7 @@ class Worker:
         self.worker_urls = {}
         self.perf_computation = []
         self.perf_network = []
+        self.perf_bench = []
         self.peer: Optional[Peer] = None
         self.async_portal = None
 
@@ -404,6 +405,7 @@ class Worker:
         task = task_list[0]
         with torch.inference_mode():
             input_shapes = [list(t.h.shape) for t in task_list]
+            torch.cuda.synchronize()
             st = time.monotonic()
             h = torch.cat([t.h for t in task_list])
             bsz_list, start_pos_list = [t.bsz for t in task_list], [t.start_pos for t in task_list]
@@ -447,9 +449,11 @@ class Worker:
                 bsz = t.bsz
                 t.h = h[start:start+bsz]
                 start += bsz
+            torch.cuda.synchronize()
             en = time.monotonic()
             latency = (en-st)*1000
             self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
+            self.perf_bench.append(latency)
         for task in task_list:
             task.call_back_queue.put((task.h, task.kv_cache_dict))
 
