@@ -31,7 +31,5 @@ for _bsz in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
         start_pos += seqlen
         # h = torch.tensor([[29962]], device="cuda")
         h = torch.randint(0, 32000, (_bsz, 1), dtype=torch.long, device="cuda")
-        # if i == 5:
-        #     worker.perf_bench = []
-    print(_bsz, worker.perf_bench)
+    print(_bsz, sum(worker.perf_bench[6:])/len(worker.perf_bench[6:]), worker.perf_bench)
     worker.perf_bench = []
