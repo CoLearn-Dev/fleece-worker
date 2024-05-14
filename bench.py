@@ -33,3 +33,25 @@ for _bsz in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
         h = torch.randint(0, 32000, (_bsz, 1), dtype=torch.long, device="cuda")
     print(_bsz, sum(worker.perf_bench[6:])/len(worker.perf_bench[6:]), worker.perf_bench)
     worker.perf_bench = []
+
+exit(0)
+
+layer_names = [
+    *[f"llama-3-70b-instruct-slice/layers.{i}" for i in range(10)],
+]
+worker.preload_layers(layer_names)
+for _bsz in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
+    h = torch.randn((_bsz, 18, 8192), dtype=torch.float16, device="cuda")
+    start_pos = 0
+    is_new_task = start_pos == 0
+    kv_cache_dict = dict()
+    for i in range(16):
+        bsz = h.shape[0]
+        seqlen = h.shape[1]
+        _, kv_cache_dict = worker.layers_forward(h, layer_names, bsz, is_new_task, 0, start_pos, seqlen, kv_cache_dict)
+        is_new_task = False
+        start_pos += seqlen
+        # h = torch.tensor([[29962]], device="cuda")
+        h = torch.randn((_bsz, 1, 8192), dtype=torch.float16, device="cuda")
+    print(_bsz, sum(worker.perf_bench[6:])/len(worker.perf_bench[6:]), worker.perf_bench)
+    worker.perf_bench = []
