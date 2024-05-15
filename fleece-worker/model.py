@@ -13,7 +13,8 @@ try:
     from flash_attn import flash_attn_with_kvcache
     ENABLE_FLASH_ATTN = True
 except ImportError as e:
-    print("Package flash-attn is not found. Please install it for better performance. https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features")
+    pass
+    # print("Package flash-attn is not found. Please install it for better performance. https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features")
 
 
 @dataclass
@@ -255,7 +256,8 @@ class Attention(nn.Module):
         bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
-        kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_cache_paged: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache_list: List,
     ):
         """
         Forward pass of the attention module.
@@ -270,29 +272,47 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
+        _, seqlen, _ = x.shape
         xq_, xk_, xv_ = self.wq(x), self.wk(x), self.wv(x)
 
-        start = 0
-        output_list = []
-        for i, bsz in enumerate(bsz_list):
-            _, seqlen, _ = x.shape
-            xq = xq_[start:start+bsz].view(bsz, seqlen, self.n_local_heads, self.head_dim)
-            xk = xk_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            start += bsz
+        if ENABLE_FLASH_ATTN:
+            cache_k, cache_v = kv_cache_paged
+            cache_seqlens = []
+            for i, bsz in enumerate(bsz_list):
+                cache_seqlens += [start_pos_list[i]]*bsz
+            cache_seqlens = torch.tensor(cache_seqlens, dtype=torch.int32, device=x.device)
+            bsz = cache_seqlens.shape[0]
 
-            start_pos = start_pos_list[i]
-            kv_cache = kv_cache_list[i]
-            cache_k, cache_v = kv_cache
+            max_len = max([x.shape[1] for x in kv_cache_list])
+            block_table = torch.zeros((bsz, max_len), dtype=torch.int32, device=x.device)
+            start = 0
+            for i, bsz in enumerate(bsz_list):
+                block_table[start:start+bsz, :kv_cache_list[i].shape[1]] = kv_cache_list[i]
+                start += bsz
 
-            if ENABLE_FLASH_ATTN:
-                cos = global_freqs_cis[0].type_as(xq)
-                sin = global_freqs_cis[1].type_as(xq)
-                output = flash_attn_with_kvcache(xq, cache_k, cache_v, xk, xv,
-                                                 rotary_cos=cos, rotary_sin=sin,
-                                                 cache_seqlens=start_pos, causal=True, rotary_interleaved=True)
-                output = output.view(bsz, seqlen, -1)
-            else:
+            bsz = cache_seqlens.shape[0]
+            xq = xq_.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            cos = global_freqs_cis[0].type_as(xq)
+            sin = global_freqs_cis[1].type_as(xq)
+            output = flash_attn_with_kvcache(xq, cache_k, cache_v, xk, xv,
+                                             rotary_cos=cos, rotary_sin=sin,
+                                             cache_seqlens=cache_seqlens, block_table=block_table, causal=True, rotary_interleaved=True)
+            output = output.view(bsz, seqlen, -1)
+        else:
+            start = 0
+            output_list = []
+            for i, bsz in enumerate(bsz_list):
+                xq = xq_[start:start+bsz].view(bsz, seqlen, self.n_local_heads, self.head_dim)
+                xk = xk_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+                xv = xv_[start:start+bsz].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+                start += bsz
+
+                start_pos = start_pos_list[i]
+                kv_cache = kv_cache_list[i]
+                cache_k, cache_v = kv_cache
+
                 freqs_cis = global_freqs_cis[start_pos: start_pos + seqlen]
                 mask = None
                 if seqlen > 1:
@@ -325,8 +345,8 @@ class Attention(nn.Module):
                 scores = F.softmax(scores.float(), dim=-1).type_as(xq)
                 output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
                 output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-            output_list.append(output)
-        output = torch.cat([x for x in output_list])
+                output_list.append(output)
+            output = torch.cat([x for x in output_list])
         return self.wo(output)
 
 
@@ -417,7 +437,8 @@ class TransformerBlock(nn.Module):
         bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
-        kv_cache_list: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_cache_paged: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache_list: List,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -433,7 +454,7 @@ class TransformerBlock(nn.Module):
 
         """
         h = x + self.attention.forward(
-            self.attention_norm(x), bsz_list, start_pos_list, global_freqs_cis, kv_cache_list
+            self.attention_norm(x), bsz_list, start_pos_list, global_freqs_cis, kv_cache_paged, kv_cache_list
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out

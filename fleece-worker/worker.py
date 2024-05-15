@@ -68,13 +68,69 @@ def parse_layer_name(layer_name: str):
     return s[0], s[1]
 
 
-KV_CACHE_BLOCK = 128
+KV_CACHE_BLOCK = 256
 
 
 def get_kv_cache_length(cur, seqlen):
     while cur < seqlen:
         cur += KV_CACHE_BLOCK
     return cur
+
+
+ENABLE_FLASH_ATTN = False
+try:
+    from flash_attn import flash_attn_with_kvcache
+    ENABLE_FLASH_ATTN = True
+except ImportError as e:
+    print("Package flash-attn is not found. Please install it for better performance. https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features")
+
+NUM_BLOCKS = 4096
+PAGE_BLOCK_SIZE = 256
+if ENABLE_FLASH_ATTN:
+    k_cache_paged = torch.randn(
+        NUM_BLOCKS, PAGE_BLOCK_SIZE, 8, 128, device=main_device
+    )
+    v_cache_paged = torch.randn(
+        NUM_BLOCKS, PAGE_BLOCK_SIZE, 8, 128, device=main_device
+    )
+    page_queue = queue.Queue()
+    _ = [page_queue.put(x) for x in range(1, NUM_BLOCKS)]
+
+
+def get_kv_cache_paged(x, start_pos, block_table, model):
+    bsz, seqlen = x.shape[0], x.shape[1]
+    if block_table is None:
+        length = get_kv_cache_length(0, start_pos + seqlen)//PAGE_BLOCK_SIZE
+        block_table = torch.zeros(
+            (
+                bsz,
+                length,
+            ),
+            device=main_device,
+            dtype=torch.int32
+        )
+        for i in range(length):
+            for j in range(bsz):
+                block_table[j, i] = page_queue.get()
+        return block_table
+    old_block_table = block_table
+    if start_pos + seqlen > block_table.shape[1]*PAGE_BLOCK_SIZE:
+        length = get_kv_cache_length(block_table.shape[1]*PAGE_BLOCK_SIZE, start_pos + seqlen)//PAGE_BLOCK_SIZE
+        block_table = torch.zeros(
+            (
+                bsz,
+                length,
+            ),
+            device=main_device,
+            dtype=torch.int32
+        )
+        block_table[:, :old_block_table.shape[1]] = old_block_table[:, :]
+        for i in range(old_block_table.shape[1], length):
+            for j in range(bsz):
+                block_table[j, i] = page_queue.get()
+        return block_table
+    else:
+        return block_table
 
 
 def get_kv_cache(x, start_pos, kv_cache, model):
@@ -332,11 +388,18 @@ class Worker:
         for step in steps:
             _, kv_cache_dict = self.task_info[(task_id, step)]
             for _, kv_cache in kv_cache_dict.items():
-                k_cache, v_cache = kv_cache
-                del_tensor(k_cache)
-                del_tensor(v_cache)
+                if ENABLE_FLASH_ATTN:
+                    block_table = kv_cache.tolist()
+                    for x in block_table:
+                        for y in x:
+                            page_queue.put(y)
+                else:
+                    k_cache, v_cache = kv_cache
+                    del_tensor(k_cache)
+                    del_tensor(v_cache)
             del self.task_info[(task_id, step)]
-        torch.cuda.empty_cache()
+        if not ENABLE_FLASH_ATTN:
+            torch.cuda.empty_cache()
 
     def pull_worker_url(self):
         r = requests.get(f"{self.controller_url}/get_worker_list",
@@ -426,14 +489,23 @@ class Worker:
                     kv_cache_list = []
                     for t in task_list:
                         if t.is_new_task:
-                            if torch.cuda.is_available():
-                                gpu_mem_info = torch.cuda.mem_get_info()
-                                if gpu_mem_info[0]/gpu_mem_info[1] < 0.05 and gpu_mem_info[0] < 2e9:
-                                    return None, None  # TODO need fix
-                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name]))
+                            # if torch.cuda.is_available():
+                            #     gpu_mem_info = torch.cuda.mem_get_info()
+                            #     if gpu_mem_info[0]/gpu_mem_info[1] < 0.05 and gpu_mem_info[0] < 2e9:
+                            #         return None, None  # TODO need fix
+                            if ENABLE_FLASH_ATTN:
+                                kv_cache_list.append(get_kv_cache_paged(t.h, t.start_pos, None, self.layers[full_layer_name]))
+                            else:
+                                kv_cache_list.append(get_kv_cache(t.h, t.start_pos, None, self.layers[full_layer_name]))
                         else:
-                            kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
-                    h = self.layers[full_layer_name](h, bsz_list, start_pos_list, global_freqs_cis, kv_cache_list)
+                            if ENABLE_FLASH_ATTN:
+                                kv_cache_list.append(get_kv_cache_paged(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
+                            else:
+                                kv_cache_list.append(get_kv_cache(t.h, t.start_pos, t.kv_cache_dict[full_layer_name], self.layers[full_layer_name]))
+                    if ENABLE_FLASH_ATTN:
+                        h = self.layers[full_layer_name](h, bsz_list, start_pos_list, global_freqs_cis, (k_cache_paged, v_cache_paged), kv_cache_list)
+                    else:
+                        h = self.layers[full_layer_name](h, bsz_list, start_pos_list, global_freqs_cis, None, kv_cache_list)
                     for i, t in enumerate(task_list):
                         t.kv_cache_dict[full_layer_name] = kv_cache_list[i]
                 elif layer_name == "norm":

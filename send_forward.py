@@ -2,6 +2,15 @@ import requests
 from fleece_network import dumps
 import uuid
 
+plan_8b = [
+    ["local", [
+        "llama-3-8b-instruct-slice/tok_embeddings",
+        *[f"llama-3-8b-instruct-slice/layers.{i}" for i in range(0, 32)],
+        "llama-3-8b-instruct-slice/norm",
+        "llama-3-8b-instruct-slice/output",
+    ]]
+]
+
 plan_70b = [
     ["4d902f27-8a42-4b9a-b7c4-67a6d3b3ed52", [
         "llama-3-70b-instruct-slice/tok_embeddings",
@@ -20,7 +29,7 @@ input = [[128000, 128006, 882, 128007, 271, 12840, 374, 279, 11363, 315, 1253, 1
 tensors = {}
 metadata = {
     "task_id": str(uuid.uuid4()),
-    "plan": plan_70b,
+    "plan": plan_8b,
     "step": 0,
     "round": 0,
     "max_total_len": 1024,
