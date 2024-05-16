@@ -29,7 +29,12 @@ python -m fleece-worker -c https://serving-api.colearn.cloud:8443 -t <api_token>
 ## Try it out (deprecated)
 
 ```
+export CUDA_VISIBLE_DEVICES=0
 python -m fleece-worker -w http://127.0.0.1:8080
+```
+
+```
+python send_forward.py
 ```
 
 ```
