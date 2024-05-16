@@ -598,44 +598,44 @@ class Worker:
         if task_manager_url is not None:
             self.task_update_queue[task_id].put((round, output_tokens))
 
-    def forward_same_node(self, delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step):
-        ans_tokens = []
-        try:
-            for i in range(delta_round):
-                h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round+i, start_pos, seqlen, kv_cache_dict)
-                # last node
-                if temperature > 0:
-                    probs = torch.softmax(h[:, -1] / temperature, dim=-1)
-                    next_token = sample_top_p(probs, top_p)
-                else:
-                    next_token = torch.argmax(h[:, -1], dim=-1)
-                next_token = next_token.reshape(-1)
-                if start_pos > max_total_len:
-                    next_token = torch.tensor([EOS_ID] * bsz, device=main_device)  # FIXME fake max length limit
-                # print(next_token)
-                # eos_reached
-                if all(eos_reached | torch.isin(next_token, stop_tokens)) or i == delta_round-1:
-                    return h, kv_cache_dict, ans_tokens, eos_reached
+    # def forward_same_node(self, delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step):
+    #     ans_tokens = []
+    #     try:
+    #         for i in range(delta_round):
+    #             h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round+i, start_pos, seqlen, kv_cache_dict)
+    #             # last node
+    #             if temperature > 0:
+    #                 probs = torch.softmax(h[:, -1] / temperature, dim=-1)
+    #                 next_token = sample_top_p(probs, top_p)
+    #             else:
+    #                 next_token = torch.argmax(h[:, -1], dim=-1)
+    #             next_token = next_token.reshape(-1)
+    #             if start_pos > max_total_len:
+    #                 next_token = torch.tensor([EOS_ID] * bsz, device=main_device)  # FIXME fake max length limit
+    #             # print(next_token)
+    #             # eos_reached
+    #             if all(eos_reached | torch.isin(next_token, stop_tokens)) or i == delta_round-1:
+    #                 return h, kv_cache_dict, ans_tokens, eos_reached
 
-                # loop
-                eos_reached |= torch.isin(next_token, stop_tokens)  # eos_id
-                ans_tokens.append(next_token)
-                start_pos = start_pos+seqlen
-                seqlen = 1
-                is_new_task = False
+    #             # loop
+    #             eos_reached |= torch.isin(next_token, stop_tokens)  # eos_id
+    #             ans_tokens.append(next_token)
+    #             start_pos = start_pos+seqlen
+    #             seqlen = 1
+    #             is_new_task = False
 
-                # first node
-                tokens = torch.zeros((bsz, 1), dtype=torch.long, device=main_device)
-                for k, t in enumerate(prompt_tokens):
-                    if len(t) > start_pos:
-                        tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long, device=main_device)
-                    else:
-                        tokens[k, :] = next_token[k]
-                h = tokens
-        finally:
-            # update_task
-            for i, output_tokens in enumerate(ans_tokens):
-                self.new_task_update(task_manager_url, task_id, step, round+i, output_tokens.tolist())
+    #             # first node
+    #             tokens = torch.zeros((bsz, 1), dtype=torch.long, device=main_device)
+    #             for k, t in enumerate(prompt_tokens):
+    #                 if len(t) > start_pos:
+    #                     tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long, device=main_device)
+    #                 else:
+    #                     tokens[k, :] = next_token[k]
+    #             h = tokens
+    #     finally:
+    #         # update_task
+    #         for i, output_tokens in enumerate(ans_tokens):
+    #             self.new_task_update(task_manager_url, task_id, step, round+i, output_tokens.tolist())
 
     def forward(self,
                 task_id: str,
@@ -651,7 +651,7 @@ class Worker:
                 timestamp: Optional[int] = None,
                 ):
         try:
-            self.verify(task_manager_url, task_id, plan, timestamp, signature)
+            # self.verify(task_manager_url, task_id, plan, timestamp, signature)
 
             index = step
             is_new_task = round == 0
@@ -720,22 +720,22 @@ class Worker:
             # forward
             _, layer_names = plan[index]
             self.preload_layers(layer_names)  # preload
-            if len(plan) == 1:
-                delta_round = 16
-                eos_reached = self.task_eos_reached[task_id].to(main_device)
-                prompt_tokens = self.task_prompt_tokens[task_id]
-                h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
-                                                                               kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
-                self.task_eos_reached[task_id] = eos_reached.to("cpu")
-                delta_round = len(tokens)+1
-                round = round+delta_round-1
-                start_pos = start_pos+delta_round-1
-            else:
-                h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict)
-            if h is None:
-                return
-            else:
-                self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
+            # if len(plan) == 1:
+            #     delta_round = 16
+            #     eos_reached = self.task_eos_reached[task_id].to(main_device)
+            #     prompt_tokens = self.task_prompt_tokens[task_id]
+            #     h, kv_cache_dict, tokens, eos_reached = self.forward_same_node(delta_round, h, layer_names, bsz, is_new_task, round, start_pos, seqlen,
+            #                                                                    kv_cache_dict, temperature, top_p, max_total_len, eos_reached, prompt_tokens, task_manager_url, task_id, step)
+            #     self.task_eos_reached[task_id] = eos_reached.to("cpu")
+            #     delta_round = len(tokens)+1
+            #     round = round+delta_round-1
+            #     start_pos = start_pos+delta_round-1
+            # else:
+            h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict)
+            # if h is None:
+            #     return
+            # else:
+            self.task_info[(task_id, step)] = (start_pos+seqlen, kv_cache_dict)
 
             # last node
             if index == len(plan)-1:
@@ -747,7 +747,7 @@ class Worker:
                 next_token = next_token.reshape(-1)
                 if start_pos > max_total_len:
                     next_token = torch.tensor([EOS_ID] * bsz)  # FIXME fake max length limit
-                # print(next_token)
+                print(next_token)
                 next_token = next_token.to("cpu")
 
                 # eos_reached
