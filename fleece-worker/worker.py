@@ -619,7 +619,8 @@ class Worker:
                 #     },
                 #     metadata=)
         if task.metadata["step"] == len(task.metadata["plan"])-1:
-            self.send_forward(task.metadata["plan"][0][0], tensors=tensors, metadata=metadata_list)
+            if len(metadata_list) > 0:
+                self.send_forward(task.metadata["plan"][0][0], tensors=tensors, metadata=metadata_list)
         else:
             self.send_forward(task.metadata["plan"][task.metadata["step"]+1][0], tensors={"payload": merged_h}, metadata=metadata_list)
 
@@ -627,19 +628,24 @@ class Worker:
         q = self.layer_forward_engine_queue
         while True:
             task_list = []
-            task = q.get()
-            total_bsz = task.bsz
-            task_list.append(task)
+            total_bsz = 0
+            tasks = q.get()
+            for task in tasks:
+                total_bsz == task.bsz
+                task_list.append(task)
             while True:
+                if total_bsz >= 16:
+                    break
                 try:
-                    task2 = q.get(block=False)
-                    if task2.seqlen == task.seqlen and task2.layer_names == task.layer_names:
-                        task_list.append(task2)
-                        total_bsz += task2.bsz
+                    tasks = q.get(block=False)
+                    if tasks[0].seqlen == task_list[0].seqlen and tasks[0].layer_names == task_list[0].layer_names:  # FIXME
+                        for task in tasks:
+                            task_list.append(task)
+                            total_bsz += task.bsz
                         if total_bsz >= 16:
                             break
                     else:
-                        q.put(task2)
+                        q.put(tasks)
                         break
                 except queue.Empty:
                     break
@@ -654,7 +660,7 @@ class Worker:
 
     def layers_forward(self, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata):
         # q = queue.Queue()
-        self.layer_forward_engine_queue.put(LayerForward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata))
+        self.layer_forward_engine_queue.put([LayerForward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata)])
         # h, kv_cache_dict = q.get()
         # del q
         # return h, kv_cache_dict
@@ -742,6 +748,7 @@ class Worker:
                        ):
         try:
             start = 0
+            layers_forward_list = []
             for i, task in enumerate(metadata_list):
                 index = task["step"]
                 is_new_task = task["round"] == 0
@@ -801,8 +808,8 @@ class Worker:
                 # forward
                 _, layer_names = plan[index]
                 self.preload_layers(layer_names)
-
-                self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, task)
+                layers_forward_list.append(LayerForward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, task))
+            self.layer_forward_engine_queue.put(layers_forward_list)
         except Exception:
             print(traceback.format_exc())
         # print(tensors, metadata_list)
