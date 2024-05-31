@@ -266,7 +266,7 @@ class LayerForward:
         start_pos: int,
         seqlen: int,
         kv_cache_dict: Dict,
-        call_back_queue: queue.Queue,
+        metadata: Dict,
     ):
         self.h = h
         self.layer_names = layer_names
@@ -276,7 +276,7 @@ class LayerForward:
         self.start_pos = start_pos
         self.seqlen = seqlen
         self.kv_cache_dict = kv_cache_dict
-        self.call_back_queue = call_back_queue
+        self.metadata = metadata
 
 
 class Worker:
@@ -522,8 +522,82 @@ class Worker:
             en = time.monotonic()
             latency = (en-st)*1000
             self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
+        # for task in task_list:
+        #     task.call_back_queue.put((task.h, task.kv_cache_dict))
+
+    def post_layer_forward_engine_step(self, task_list: List[LayerForward]):
         for task in task_list:
-            task.call_back_queue.put((task.h, task.kv_cache_dict))
+            self.task_info[(task.metadata["task_id"], task.metadata["step"])] = (task.start_pos+task.seqlen, task.kv_cache_dict)
+            # last node
+            if task.metadata["step"] == len(task.metadata["plan"])-1:
+                if task.metadata["temperature"] > 0:
+                    probs = torch.softmax(task.h[:, -1] / task.metadata["temperature"], dim=-1)
+                    next_token = sample_top_p(probs, task.metadata["top_p"])
+                else:
+                    next_token = torch.argmax(task.h[:, -1], dim=-1)
+                next_token = next_token.reshape(-1)
+                if task.start_pos > task.metadata["max_total_len"]:
+                    next_token = torch.tensor([EOS_ID] * task.bsz)  # FIXME fake max length limit
+                print(next_token)
+                next_token = next_token.to("cpu")
+
+                # eos_reached
+                self.task_eos_reached[task.metadata["task_id"]] |= torch.isin(next_token, stop_tokens_cpu)  # eos_id
+                if not all(self.task_eos_reached[task.metadata["task_id"]]):
+                    # next node
+                    self.send_forward(
+                        task.metadata["plan"][0][0],
+                        tensors={
+                            "payload": next_token,
+                        },
+                        metadata={
+                            "task_id": task.metadata["task_id"],
+                            "plan": task.metadata["plan"],
+                            "step": 0,
+                            "round": task.metadata["round"]+1,
+                            "max_total_len": task.metadata["max_total_len"],
+                            "temperature": task.metadata["temperature"],
+                            "top_p": task.metadata["top_p"],
+                            "task_manager_url": task.metadata["task_manager_url"],
+                            "signature": task.metadata["signature"],
+                            "timestamp": task.metadata["timestamp"],
+                        })
+                else:
+                    self.send_forward(
+                        task.metadata["plan"][0][0],
+                        tensors={},
+                        metadata={
+                            "task_id": task.metadata["task_id"],
+                            "plan": task.metadata["plan"],
+                            "step": 0,
+                            "task_manager_url": task.metadata["task_manager_url"],
+                            "signature": task.metadata["signature"],
+                            "timestamp": task.metadata["timestamp"],
+                        })
+                # update
+                if task.metadata["task_manager_url"] is not None:
+                    self.new_task_update(task.metadata["task_manager_url"], task.metadata["task_id"], task.metadata["step"], task.metadata["round"], next_token.tolist())
+                if all(self.task_eos_reached[task.metadata["task_id"]]):
+                    self.cancel_task(task.metadata["task_id"], True)
+            else:
+                # next node
+                self.send_forward(
+                    task.metadata["plan"][task.metadata["step"]+1][0],
+                    tensors={
+                        "payload": task.h,
+                    },
+                    metadata={
+                        "task_id": task.metadata["task_id"],
+                        "plan": task.metadata["plan"],
+                        "step": task.metadata["step"]+1,
+                        "round": task.metadata["round"],
+                        "max_total_len": task.metadata["max_total_len"],
+                        "temperature": task.metadata["temperature"],
+                        "top_p": task.metadata["top_p"],
+                        "task_manager_url": task.metadata["task_manager_url"],
+                        "signature": task.metadata["signature"],
+                        "timestamp": task.metadata["timestamp"],
+                    })
 
     def layer_forward_engine(self):
         q = self.layer_forward_engine_queue
@@ -547,18 +621,19 @@ class Worker:
                     break
             # print("layer_forward_engine_step: ", len(task_list))
             self.layer_forward_engine_step(task_list)
+            self.post_layer_forward_engine_step(task_list)
 
     def start_layer_forward_engine(self):
         heartbeat_thread = threading.Thread(target=self.layer_forward_engine)
         heartbeat_thread.daemon = True
         heartbeat_thread.start()
 
-    def layers_forward(self, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict):
-        q = queue.Queue()
-        self.layer_forward_engine_queue.put(LayerForward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, q))
-        h, kv_cache_dict = q.get()
-        del q
-        return h, kv_cache_dict
+    def layers_forward(self, h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata):
+        # q = queue.Queue()
+        self.layer_forward_engine_queue.put(LayerForward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata))
+        # h, kv_cache_dict = q.get()
+        # del q
+        # return h, kv_cache_dict
 
     def send_update_task(self, task_manager_url, task_id, step):
         q = self.task_update_queue[task_id]
@@ -731,7 +806,21 @@ class Worker:
             #     round = round+delta_round-1
             #     start_pos = start_pos+delta_round-1
             # else:
-            h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict)
+            metadata = {
+                "task_id": task_id,
+                "plan": plan,
+                "step": step,
+                "round": round,
+                "max_total_len": max_total_len,
+                "temperature": temperature,
+                "top_p": top_p,
+                "task_manager_url": task_manager_url,
+                "signature": signature,
+                "timestamp": timestamp,
+            }
+            self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata)
+            return
+            h, kv_cache_dict = self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata)
             # if h is None:
             #     return
             # else:
