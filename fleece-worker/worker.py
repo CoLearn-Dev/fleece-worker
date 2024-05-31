@@ -435,7 +435,20 @@ class Worker:
 
     def send_forward(self, to_worker_id, tensors: dict[str, Tensor], metadata: dict[str, Any]):
         if to_worker_id == self.worker_id:
-            executor.submit(self.forward, **tensors, **metadata)
+            if isinstance(metadata, dict):
+                executor.submit(
+                    self.forward,
+                    **tensors,
+                    **metadata,
+                )
+            elif isinstance(metadata, list):
+                executor.submit(
+                    self.forward_merged,
+                    tensors,
+                    metadata,
+                )
+            else:
+                raise
             return
         url = self.get_worker_url(to_worker_id)
         buffer = dumps(tensors, metadata)
@@ -514,27 +527,36 @@ class Worker:
                     h = self.layers[full_layer_name](h)
                 else:
                     raise NotImplementedError("Unknown layers")
-            start = 0
-            for t in task_list:
-                bsz = t.bsz
-                t.h = h[start:start+bsz]
-                start += bsz
+            # start = 0
+            # for t in task_list:
+            #     bsz = t.bsz
+            #     t.h = h[start:start+bsz]
+            #     start += bsz
             en = time.monotonic()
             latency = (en-st)*1000
             self.perf_computation.append(((str(task.layer_names), str(input_shapes)), latency))
+        return h
         # for task in task_list:
         #     task.call_back_queue.put((task.h, task.kv_cache_dict))
 
-    def post_layer_forward_engine_step(self, task_list: List[LayerForward]):
+    def post_layer_forward_engine_step(self, task_list: List[LayerForward], merged_h):
+        start = 0
+        tensors = {}
+        metadata_list = []
         for task in task_list:
             self.task_info[(task.metadata["task_id"], task.metadata["step"])] = (task.start_pos+task.seqlen, task.kv_cache_dict)
+
+            bsz = task.bsz
+            h = merged_h[start:start+bsz]
+            start += bsz
+
             # last node
             if task.metadata["step"] == len(task.metadata["plan"])-1:
                 if task.metadata["temperature"] > 0:
-                    probs = torch.softmax(task.h[:, -1] / task.metadata["temperature"], dim=-1)
+                    probs = torch.softmax(h[:, -1] / task.metadata["temperature"], dim=-1)
                     next_token = sample_top_p(probs, task.metadata["top_p"])
                 else:
-                    next_token = torch.argmax(task.h[:, -1], dim=-1)
+                    next_token = torch.argmax(h[:, -1], dim=-1)
                 next_token = next_token.reshape(-1)
                 if task.start_pos > task.metadata["max_total_len"]:
                     next_token = torch.tensor([EOS_ID] * task.bsz)  # FIXME fake max length limit
@@ -545,23 +567,19 @@ class Worker:
                 self.task_eos_reached[task.metadata["task_id"]] |= torch.isin(next_token, stop_tokens_cpu)  # eos_id
                 if not all(self.task_eos_reached[task.metadata["task_id"]]):
                     # next node
-                    self.send_forward(
-                        task.metadata["plan"][0][0],
-                        tensors={
-                            "payload": next_token,
-                        },
-                        metadata={
-                            "task_id": task.metadata["task_id"],
-                            "plan": task.metadata["plan"],
-                            "step": 0,
-                            "round": task.metadata["round"]+1,
-                            "max_total_len": task.metadata["max_total_len"],
-                            "temperature": task.metadata["temperature"],
-                            "top_p": task.metadata["top_p"],
-                            "task_manager_url": task.metadata["task_manager_url"],
-                            "signature": task.metadata["signature"],
-                            "timestamp": task.metadata["timestamp"],
-                        })
+                    tensors[str(len(metadata_list))] = next_token
+                    metadata_list.append({
+                        "task_id": task.metadata["task_id"],
+                        "plan": task.metadata["plan"],
+                        "step": 0,
+                        "round": task.metadata["round"]+1,
+                        "max_total_len": task.metadata["max_total_len"],
+                        "temperature": task.metadata["temperature"],
+                        "top_p": task.metadata["top_p"],
+                        "task_manager_url": task.metadata["task_manager_url"],
+                        "signature": task.metadata["signature"],
+                        "timestamp": task.metadata["timestamp"],
+                    })
                 else:
                     self.send_forward(
                         task.metadata["plan"][0][0],
@@ -581,23 +599,29 @@ class Worker:
                     self.cancel_task(task.metadata["task_id"], True)
             else:
                 # next node
-                self.send_forward(
-                    task.metadata["plan"][task.metadata["step"]+1][0],
-                    tensors={
-                        "payload": task.h,
-                    },
-                    metadata={
-                        "task_id": task.metadata["task_id"],
-                        "plan": task.metadata["plan"],
-                        "step": task.metadata["step"]+1,
-                        "round": task.metadata["round"],
-                        "max_total_len": task.metadata["max_total_len"],
-                        "temperature": task.metadata["temperature"],
-                        "top_p": task.metadata["top_p"],
-                        "task_manager_url": task.metadata["task_manager_url"],
-                        "signature": task.metadata["signature"],
-                        "timestamp": task.metadata["timestamp"],
-                    })
+                metadata_list.append({
+                    "task_id": task.metadata["task_id"],
+                    "plan": task.metadata["plan"],
+                    "step": task.metadata["step"]+1,
+                    "round": task.metadata["round"],
+                    "max_total_len": task.metadata["max_total_len"],
+                    "temperature": task.metadata["temperature"],
+                    "top_p": task.metadata["top_p"],
+                    "task_manager_url": task.metadata["task_manager_url"],
+                    "signature": task.metadata["signature"],
+                    "timestamp": task.metadata["timestamp"],
+                    "bsz": task.bsz,
+                })
+                # self.send_forward(
+                #     task.metadata["plan"][task.metadata["step"]+1][0],
+                #     tensors={
+                #         "payload": h,
+                #     },
+                #     metadata=)
+        if task.metadata["step"] == len(task.metadata["plan"])-1:
+            self.send_forward(task.metadata["plan"][0][0], tensors=tensors, metadata=metadata_list)
+        else:
+            self.send_forward(task.metadata["plan"][task.metadata["step"]+1][0], tensors={"payload": merged_h}, metadata=metadata_list)
 
     def layer_forward_engine(self):
         q = self.layer_forward_engine_queue
@@ -620,8 +644,8 @@ class Worker:
                 except queue.Empty:
                     break
             # print("layer_forward_engine_step: ", len(task_list))
-            self.layer_forward_engine_step(task_list)
-            self.post_layer_forward_engine_step(task_list)
+            h = self.layer_forward_engine_step(task_list)
+            self.post_layer_forward_engine_step(task_list, h)
 
     def start_layer_forward_engine(self):
         heartbeat_thread = threading.Thread(target=self.layer_forward_engine)
@@ -711,6 +735,77 @@ class Worker:
     #         # update_task
     #         for i, output_tokens in enumerate(ans_tokens):
     #             self.new_task_update(task_manager_url, task_id, step, round+i, output_tokens.tolist())
+
+    def forward_merged(self,
+                       tensors: Dict[str, torch.Tensor],
+                       metadata_list: List[Dict],
+                       ):
+        try:
+            start = 0
+            for i, task in enumerate(metadata_list):
+                index = task["step"]
+                is_new_task = task["round"] == 0
+                task_id = task["task_id"]
+                round = task["round"]
+                step = task["step"]
+                plan = task["plan"]
+                if is_new_task:
+                    if task_id in self.task_local_steps:
+                        self.task_local_steps[task_id].append(step)
+                    else:
+                        self.task_local_steps[task_id] = [step]
+                    self.task_info[(task_id, step)] = (0, dict())
+                else:
+                    if not task_id in self.task_local_steps:
+                        return
+                start_pos, kv_cache_dict = self.task_info[(task_id, step)]
+
+                # first node
+                if index == 0:
+                    payload = tensors[str(i)]
+                    bsz = len(payload)
+                    if is_new_task:
+                        min_prompt_len = min(len(t) for t in payload)
+                        self.task_prompt_tokens[task_id] = payload
+                        tokens = torch.zeros((bsz, min_prompt_len), dtype=torch.long)
+                        for k, t in enumerate(payload):
+                            tokens[k, :] = torch.tensor(t[:min_prompt_len], dtype=torch.long)
+                        h = tokens.to(main_device)
+                    else:
+                        prompt_tokens = self.task_prompt_tokens[task_id]
+                        tokens = torch.zeros((bsz, 1), dtype=torch.long)
+                        for k, t in enumerate(prompt_tokens):
+                            if len(t) > start_pos:
+                                tokens[k, :] = torch.tensor([t[start_pos]], dtype=torch.long)
+                            else:
+                                tokens[k, :] = torch.tensor([payload[k]], dtype=torch.long)
+                        h = tokens.to(main_device)
+                    # print(h)
+                    bsz, seqlen = h.shape
+                else:
+                    bsz = task["bsz"]
+                    payload = tensors["payload"][start:start+bsz]
+                    start += bsz
+                    h = payload.to(main_dtype).to(main_device)  # h = torch.tensor(payload, dtype=main_dtype, device=main_device)
+                    if len(h.shape) > 2:
+                        bsz, seqlen, _ = h.shape
+                    else:
+                        bsz, seqlen = h.shape
+
+                # last node init
+                if index == len(plan)-1 and is_new_task:
+                    self.task_eos_reached[task_id] = torch.tensor([False] * bsz)
+                    self.task_update_queue[task_id] = queue.Queue()
+                    executor.submit(self.send_update_task, task["task_manager_url"], task_id, step)
+
+                # forward
+                _, layer_names = plan[index]
+                self.preload_layers(layer_names)
+
+                self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, task)
+        except Exception:
+            print(traceback.format_exc())
+        # print(tensors, metadata_list)
 
     def forward(self,
                 task_id: str,

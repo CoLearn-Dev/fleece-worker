@@ -59,11 +59,20 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=64)
 def forward(req: bytes):
     try:
         tensors, metadata = loads(req)
-        executor.submit(
-            worker.forward,
-            **tensors,
-            **metadata,
-        )
+        if isinstance(metadata, dict):
+            executor.submit(
+                worker.forward,
+                **tensors,
+                **metadata,
+            )
+        elif isinstance(metadata, list):
+            executor.submit(
+                worker.forward_merged,
+                tensors,
+                metadata,
+            )
+        else:
+            raise
         return None
     except Exception as e:
         print(e)
@@ -74,11 +83,20 @@ async def app_forward(request: Request):
     buffer = await request.body()
     try:
         tensors, metadata = loads(buffer)
-        executor.submit(
-            worker.forward,
-            **tensors,
-            **metadata,
-        )
+        if isinstance(metadata, dict):
+            executor.submit(
+                worker.forward,
+                **tensors,
+                **metadata,
+            )
+        elif isinstance(metadata, list):
+            executor.submit(
+                worker.forward_merged,
+                tensors,
+                metadata,
+            )
+        else:
+            raise
         return None
     except Exception as e:
         print(e)
