@@ -625,7 +625,7 @@ class Worker:
             self.send_forward(task.metadata["plan"][task.metadata["step"]+1][0], tensors={"payload": merged_h}, metadata=metadata_list)
 
     def layer_forward_engine(self):
-        MAX_TOTAL_BSZ = 16
+        MAX_TOTAL_BSZ = 64
         q = self.layer_forward_engine_queue
         while True:
             task_list = []
@@ -645,6 +645,7 @@ class Worker:
                             if bsz > total_bsz:
                                 q.put(task_list)
                                 task_list = tasks
+                                total_bsz = bsz
                             else:
                                 q.put(tasks)
                             break
