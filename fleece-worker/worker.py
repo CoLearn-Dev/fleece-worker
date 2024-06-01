@@ -560,7 +560,7 @@ class Worker:
                 next_token = next_token.reshape(-1)
                 if task.start_pos > task.metadata["max_total_len"]:
                     next_token = torch.tensor([EOS_ID] * task.bsz)  # FIXME fake max length limit
-                print(next_token)
+                # print(next_token)
                 next_token = next_token.to("cpu")
 
                 # eos_reached
@@ -625,31 +625,40 @@ class Worker:
             self.send_forward(task.metadata["plan"][task.metadata["step"]+1][0], tensors={"payload": merged_h}, metadata=metadata_list)
 
     def layer_forward_engine(self):
+        MAX_TOTAL_BSZ = 16
         q = self.layer_forward_engine_queue
         while True:
             task_list = []
             total_bsz = 0
             tasks = q.get()
             for task in tasks:
-                total_bsz == task.bsz
+                total_bsz += task.bsz
                 task_list.append(task)
             while True:
-                if total_bsz >= 16:
+                if total_bsz > MAX_TOTAL_BSZ:
                     break
                 try:
                     tasks = q.get(block=False)
                     if tasks[0].seqlen == task_list[0].seqlen and tasks[0].layer_names == task_list[0].layer_names:  # FIXME
+                        bsz = sum([task.bsz for task in tasks])
+                        if total_bsz+bsz > MAX_TOTAL_BSZ:
+                            if bsz > total_bsz:
+                                q.put(task_list)
+                                task_list = tasks
+                            else:
+                                q.put(tasks)
+                            break
                         for task in tasks:
                             task_list.append(task)
                             total_bsz += task.bsz
-                        if total_bsz >= 16:
+                        if total_bsz > MAX_TOTAL_BSZ:
                             break
                     else:
                         q.put(tasks)
                         break
                 except queue.Empty:
                     break
-            # print("layer_forward_engine_step: ", len(task_list))
+            print("layer_forward_engine_step: ", len(task_list), total_bsz)
             h = self.layer_forward_engine_step(task_list)
             self.post_layer_forward_engine_step(task_list, h)
 
