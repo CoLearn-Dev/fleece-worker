@@ -541,8 +541,8 @@ class Worker:
 
     def post_layer_forward_engine_step(self, task_list: List[LayerForward], merged_h):
         start = 0
-        tensors = {}
-        metadata_list = []
+        next_token_list = []
+        metadata_list = [{"plan": task_list[0].metadata["plan"]}]
         for task in task_list:
             self.task_info[(task.metadata["task_id"], task.metadata["step"])] = (task.start_pos+task.seqlen, task.kv_cache_dict)
 
@@ -567,10 +567,11 @@ class Worker:
                 self.task_eos_reached[task.metadata["task_id"]] |= torch.isin(next_token, stop_tokens_cpu)  # eos_id
                 if not all(self.task_eos_reached[task.metadata["task_id"]]):
                     # next node
-                    tensors[str(len(metadata_list))] = next_token
+                    # tensors[str(len(metadata_list))] = next_token
+                    next_token_list.append(next_token)
                     metadata_list.append({
                         "task_id": task.metadata["task_id"],
-                        "plan": task.metadata["plan"],
+                        # "plan": task.metadata["plan"],
                         "step": 0,
                         "round": task.metadata["round"]+1,
                         "max_total_len": task.metadata["max_total_len"],
@@ -579,6 +580,7 @@ class Worker:
                         "task_manager_url": task.metadata["task_manager_url"],
                         "signature": task.metadata["signature"],
                         "timestamp": task.metadata["timestamp"],
+                        "bsz": task.bsz,
                     })
                 else:
                     self.send_forward(
@@ -601,7 +603,7 @@ class Worker:
                 # next node
                 metadata_list.append({
                     "task_id": task.metadata["task_id"],
-                    "plan": task.metadata["plan"],
+                    # "plan": task.metadata["plan"],
                     "step": task.metadata["step"]+1,
                     "round": task.metadata["round"],
                     "max_total_len": task.metadata["max_total_len"],
@@ -619,8 +621,9 @@ class Worker:
                 #     },
                 #     metadata=)
         if task.metadata["step"] == len(task.metadata["plan"])-1:
-            if len(metadata_list) > 0:
-                self.send_forward(task.metadata["plan"][0][0], tensors=tensors, metadata=metadata_list)
+            if len(next_token_list) > 0:
+                merged_next_token = torch.cat(next_token_list)
+                self.send_forward(task.metadata["plan"][0][0], tensors={"payload": merged_next_token}, metadata=metadata_list)
         else:
             self.send_forward(task.metadata["plan"][task.metadata["step"]+1][0], tensors={"payload": merged_h}, metadata=metadata_list)
 
@@ -662,6 +665,10 @@ class Worker:
             print("layer_forward_engine_step: ", len(task_list), total_bsz)
             h = self.layer_forward_engine_step(task_list)
             self.post_layer_forward_engine_step(task_list, h)
+            # executor_forward.submit(
+            #     self.post_layer_forward_engine_step,
+            #     task_list, h
+            # )
 
     def start_layer_forward_engine(self):
         heartbeat_thread = threading.Thread(target=self.layer_forward_engine)
@@ -759,13 +766,15 @@ class Worker:
         try:
             start = 0
             layers_forward_list = []
+            plan = metadata_list[0]["plan"]
+            metadata_list.pop(0)
             for i, task in enumerate(metadata_list):
                 index = task["step"]
                 is_new_task = task["round"] == 0
                 task_id = task["task_id"]
                 round = task["round"]
                 step = task["step"]
-                plan = task["plan"]
+                task["plan"] = plan
                 if is_new_task:
                     if task_id in self.task_local_steps:
                         self.task_local_steps[task_id].append(step)
@@ -779,8 +788,10 @@ class Worker:
 
                 # first node
                 if index == 0:
-                    payload = tensors[str(i)]
-                    bsz = len(payload)
+                    # payload = tensors[str(i)]
+                    bsz = task["bsz"]
+                    payload = tensors["payload"][start:start+bsz]
+                    start += bsz
                     if is_new_task:
                         min_prompt_len = min(len(t) for t in payload)
                         self.task_prompt_tokens[task_id] = payload
