@@ -84,7 +84,7 @@ try:
 except ImportError as e:
     print("Package flash-attn is not found. Please install it for better performance. https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features")
 
-NUM_BLOCKS = 4096
+NUM_BLOCKS = 12096
 PAGE_BLOCK_SIZE = 256
 if ENABLE_FLASH_ATTN:
     k_cache_paged = torch.randn(
@@ -542,6 +542,7 @@ class Worker:
     def post_layer_forward_engine_step(self, task_list: List[LayerForward], merged_h):
         start = 0
         next_token_list = []
+        task_update_list = []
         metadata_list = [{"plan": task_list[0].metadata["plan"]}]
         for task in task_list:
             self.task_info[(task.metadata["task_id"], task.metadata["step"])] = (task.start_pos+task.seqlen, task.kv_cache_dict)
@@ -596,7 +597,8 @@ class Worker:
                         })
                 # update
                 if task.metadata["task_manager_url"] is not None:
-                    self.new_task_update(task.metadata["task_manager_url"], task.metadata["task_id"], task.metadata["step"], task.metadata["round"], next_token.tolist())
+                    # self.new_task_update(task.metadata["task_manager_url"], task.metadata["task_id"], task.metadata["step"], task.metadata["round"], next_token.tolist())
+                    task_update_list.append((task.metadata["task_manager_url"], task.metadata["task_id"], task.metadata["step"], task.metadata["round"], next_token.tolist()))
                 if all(self.task_eos_reached[task.metadata["task_id"]]):
                     self.cancel_task(task.metadata["task_id"], True)
             else:
@@ -620,12 +622,15 @@ class Worker:
                 #         "payload": h,
                 #     },
                 #     metadata=)
+        # torch.cuda.synchronize()
+        # print("1.1", time.monotonic())
         if task.metadata["step"] == len(task.metadata["plan"])-1:
             if len(next_token_list) > 0:
                 merged_next_token = torch.cat(next_token_list)
                 self.send_forward(task.metadata["plan"][0][0], tensors={"payload": merged_next_token}, metadata=metadata_list)
         else:
             self.send_forward(task.metadata["plan"][task.metadata["step"]+1][0], tensors={"payload": merged_h}, metadata=metadata_list)
+        return task_update_list
 
     def layer_forward_engine(self):
         MAX_TOTAL_BSZ = 64
@@ -662,13 +667,25 @@ class Worker:
                         break
                 except queue.Empty:
                     break
-            print("layer_forward_engine_step: ", len(task_list), total_bsz)
+            # print("layer_forward_engine_step: ", len(task_list), total_bsz)
+            # torch.cuda.synchronize()
+            # print("0", time.monotonic())
             h = self.layer_forward_engine_step(task_list)
-            self.post_layer_forward_engine_step(task_list, h)
-            # executor_forward.submit(
-            #     self.post_layer_forward_engine_step,
-            #     task_list, h
-            # )
+            # torch.cuda.synchronize()
+            # print("1", time.monotonic())
+            task_update_list = self.post_layer_forward_engine_step(task_list, h)
+            # torch.cuda.synchronize()
+            # print("2", time.monotonic())
+            tmp_len = sum([len(task[4]) for task in task_update_list])
+            print(time.monotonic(), len(task_list), total_bsz, tmp_len)
+    #         executor_forward.submit(
+    #             self.tmptmp,
+    #             task_update_list
+    #         )
+
+    # def tmptmp(self, task_update_list):
+    #     for task_update in task_update_list:
+    #         self.new_task_update(task_update[0], task_update[1], task_update[2], task_update[3], task_update[4])
 
     def start_layer_forward_engine(self):
         heartbeat_thread = threading.Thread(target=self.layer_forward_engine)
