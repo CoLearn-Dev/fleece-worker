@@ -678,14 +678,26 @@ class Worker:
             # print("2", time.monotonic())
             tmp_len = sum([len(task[4]) for task in task_update_list])
             print(time.monotonic(), len(task_list), total_bsz, tmp_len)
-    #         executor_forward.submit(
-    #             self.tmptmp,
-    #             task_update_list
-    #         )
+            executor_forward.submit(
+                self.tmptmp,
+                task_update_list
+            )
 
-    # def tmptmp(self, task_update_list):
-    #     for task_update in task_update_list:
-    #         self.new_task_update(task_update[0], task_update[1], task_update[2], task_update[3], task_update[4])
+    def tmptmp(self, task_update_list):
+        req_list = []
+        for task_update in task_update_list:
+            # self.new_task_update(task_update[0], task_update[1], task_update[2], task_update[3], task_update[4])
+            task_manager_url = task_update[0]
+            req_list.append({
+                "task_id": task_update[1],
+                "plan_current_step": task_update[2],
+                "plan_current_round": task_update[3],
+                "output_tokens": [task_update[4]],
+            })
+        requests_post(
+            f"{task_manager_url}/update_tasks",
+            headers={"worker-id": self.worker_id, "api-token": self.api_token},
+            json=req_list)
 
     def start_layer_forward_engine(self):
         heartbeat_thread = threading.Thread(target=self.layer_forward_engine)
