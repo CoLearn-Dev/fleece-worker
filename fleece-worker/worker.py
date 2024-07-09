@@ -86,6 +86,7 @@ except ImportError as e:
 
 NUM_BLOCKS = 12096
 PAGE_BLOCK_SIZE = 256
+MAX_TOTAL_BSZ = 64
 if ENABLE_FLASH_ATTN:
     k_cache_paged = torch.randn(
         NUM_BLOCKS, PAGE_BLOCK_SIZE, 8, 128, device=main_device
@@ -200,6 +201,7 @@ def requests_post(url, headers=None, data=None, json=None, worker=None, to_worke
     try:
         if to_worker_id is not None:
             st = time.monotonic()
+        # time.sleep(0.01)
         r = requests.post(url, headers=headers, data=data, json=json)
         assert r.status_code == 200
         if to_worker_id is not None:
@@ -633,7 +635,6 @@ class Worker:
         return task_update_list
 
     def layer_forward_engine(self):
-        MAX_TOTAL_BSZ = 64
         q = self.layer_forward_engine_queue
         while True:
             task_list = []
