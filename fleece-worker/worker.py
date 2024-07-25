@@ -636,6 +636,50 @@ class Worker:
 
     def layer_forward_engine(self):
         q = self.layer_forward_engine_queue
+        while True: 
+            q_buffered: list[list[LayerForward]] = [q.get()]
+            while True: 
+                try: 
+                    tasks = q.get(block=False)
+                    q_buffered.append(tasks)
+                except queue.Empty:
+                    break
+            prefill_tasks_list = [tasks for tasks in q_buffered if tasks[0].seqlen > 1]
+            decode_tasks_list = [tasks for tasks in q_buffered if tasks[0].seqlen == 1]
+            
+            for tasks in prefill_tasks_list:
+                h = self.layer_forward_engine_step(tasks)
+                task_update_list = self.post_layer_forward_engine_step(tasks, h)
+                tmp_len = sum([len(task[4]) for task in task_update_list])
+                print(time.monotonic(), len(tasks), sum([task.bsz for task in tasks]), tmp_len)
+                executor_forward.submit(
+                    self.tmptmp,
+                    task_update_list
+                )
+            
+            decode_tasks_list.sort(key=lambda x: x[0].bsz, reverse=False)
+            while len(decode_tasks_list) > 0: 
+                total_bsz = 0
+                task_list = []
+                for i in reversed(range(len(decode_tasks_list))): 
+                    print(i)
+                    cur_bsz = sum([task.bsz for task in decode_tasks_list[i]])
+                    if total_bsz + cur_bsz > MAX_TOTAL_BSZ: 
+                        continue
+                    total_bsz += cur_bsz
+                    task_list.extend(decode_tasks_list.pop(i))
+                h = self.layer_forward_engine_step(task_list)
+                task_update_list = self.post_layer_forward_engine_step(task_list, h)
+                tmp_len = sum([len(task[4]) for task in task_update_list])
+                print(time.monotonic(), len(task_list), sum([task.bsz for task in task_list]), tmp_len)
+                executor_forward.submit(
+                    self.tmptmp,
+                    task_update_list
+                )
+                    
+                    
+    def layer_forward_engine_old(self):
+        q = self.layer_forward_engine_queue
         while True:
             task_list = []
             total_bsz = 0
