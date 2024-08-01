@@ -1,20 +1,22 @@
-from typing import List, Optional, Tuple, Dict, Any, Set
-import os
-import torch
-from torch import Tensor, nn
-from .model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
-from fleece_network import Peer, dumps
-import requests
-import threading
 import concurrent.futures
-import time
-import socket
-from urllib.parse import urlparse
 import json
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes
+import os
 import queue
+import socket
+import threading
+import time
 import traceback
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
+
+import requests
+import torch
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from fleece_network import Peer, dumps
+from torch import Tensor, nn
+
+from .model import ModelArgs, RMSNorm, TransformerBlock, precompute_freqs_cis
 
 torch.set_default_device("cpu")
 
@@ -195,13 +197,14 @@ def del_tensor(t):
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=400)
 executor_forward = concurrent.futures.ThreadPoolExecutor(max_workers=40)
+latency = 0.001
 
 
 def requests_post(url, headers=None, data=None, json=None, worker=None, to_worker_id=None):
     try:
         if to_worker_id is not None:
             st = time.monotonic()
-        # time.sleep(0.01)
+        time.sleep(latency)
         r = requests.post(url, headers=headers, data=data, json=json)
         assert r.status_code == 200
         if to_worker_id is not None:
@@ -410,10 +413,11 @@ class Worker:
         for worker in res["workers"]:
             self.worker_urls[worker["worker_id"]] = worker["url"]
 
-    def get_worker_url(self, worker_id):
-        if worker_id not in self.worker_urls:
-            self.pull_worker_url()
-        return self.worker_urls.get(worker_id)
+    def get_worker_url(self, worker_id: str) -> str:
+        return worker_id
+        # if worker_id not in self.worker_urls:
+        #     self.pull_worker_url()
+        # return self.worker_urls.get(worker_id)
 
     def verify(self, tm_url, task_id, plan, timestamp, signature_hex):
         public_key_bytes = bytes.fromhex(self.tm_pubkeys[tm_url])

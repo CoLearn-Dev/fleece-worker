@@ -1,17 +1,19 @@
-from typing import List, Tuple, Optional
+import argparse
+import concurrent.futures
+import json
+from typing import List, Optional, Tuple
+
+import anyio
+import requests
+import torch
+import uvicorn
+from anyio.from_thread import BlockingPortal
 from fastapi import FastAPI, HTTPException, Request
 from fleece_network import Peer, loads
 from pydantic import BaseModel
-import anyio
-import uvicorn
-from .worker import Worker
+
 from .__init__ import __version__
-import argparse
-import requests
-import json
-import torch
-import concurrent.futures
-from anyio.from_thread import BlockingPortal
+from .worker import Worker
 
 app = FastAPI()
 worker = Worker()
@@ -176,7 +178,8 @@ async def main() -> None:
                           json=data,
                           headers={"api-token": worker.api_token})
         res = json.loads(r.content)
-        worker.worker_id = res["id"]
+        # worker.worker_id = res["id"]
+        worker.worker_id = worker_url
         worker.pull_worker_url()
         worker.start_heartbeat_daemon()
         worker.start_layer_forward_engine()
